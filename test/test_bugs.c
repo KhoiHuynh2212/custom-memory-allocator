@@ -1,7 +1,7 @@
 #include "../src/debug.h"
 #include "my-malloc.h"
 #include <stdlib.h>
-#include <time.h>
+#include <time.h>   
 
 void test_grow_top_topsize_stays_synced(void)
 {
@@ -9,10 +9,10 @@ void test_grow_top_topsize_stays_synced(void)
 
     size_t almost_all = 65526;
     void *a = my_malloc(almost_all);
-    check_top_chunk();
+    check_top_chunk((struct malloc_state*)debug_get_state());
 
     void *b = my_malloc(500);
-    check_top_chunk();
+    check_top_chunk((struct malloc_state*)debug_get_state());
 
     printf("test_grow_top_topsize_stays_synced: PASS\n");
 

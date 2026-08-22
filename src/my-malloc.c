@@ -114,7 +114,7 @@ mblockptr *find_suitable_block(size_t request_size)
             g_scan_steps++;
 
 
-            if(!ok_address(curr_block)) {
+            if(!ok_address(&gm,curr_block)) {
                 fprintf(stderr, "heap corruption detected: bad free-list pointer %p\n",(void *)curr_block);
                 abort();
             }
@@ -186,7 +186,7 @@ mblockptr *coalesce(mblockptr *curr)
 {
     size_t *footer = (size_t *)((char *)curr - FOOTER_SIZE);
 
-    int prev_free = ok_address(footer);
+    int prev_free = ok_address(&gm, footer);
 
     mblockptr *prev = prev_free ? BLOCK_PREV_HEADER(curr, *footer) : NULL;
 

@@ -1,5 +1,5 @@
 CC      := gcc
-CFLAGS  := -Wall -Wextra -std=c11 -Iinclude -pthread -D_GNU_SOURCE
+CFLAGS  := -Wall -Wextra -std=c11 -Iinclude -pthread 
 DBGFLAGS:= -g
 OPTFLAGS:= -O2
 ASAN    := -fsanitize=address,undefined

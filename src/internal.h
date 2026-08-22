@@ -16,7 +16,7 @@
 
 #define align _Alignof(max_align_t) // return system align
 #define align_up(n) (((n) + align - 1) & ~(align - 1))
-#define is_aligned(n) ((size_t)(n) & (align - 1)) == 0)
+#define is_aligned(n) (((size_t)(n) & (align - 1)) == 0)
 #define MINBLOCKSIZE (HEADER_SIZE + FOOTER_SIZE + align) // minimum size to split
 #define free_bit (1 << 0)                                // bit 0: 1 = free, 0 = allocated
 #define mmap_bit (1 << 1)                                // bit 1: 1 = mmapped, 0 = sbrk'd
@@ -83,9 +83,8 @@ typedef struct malloc_state {
     char *heap_end;
 } malloc_state;  
 
-#define ok_address(a) \
-    ((char*)(a) >= gm.heap_start && (char* )(a) <= gm.heap_end)
-
+#define ok_address(state, a) \
+    ((char*)(a) >= (state)->heap_start && (char*)(a) <= (state)->heap_end) 
 // function prototypes
 void heap_init(void);
 mblockptr *find_suitable_block(size_t request_size);

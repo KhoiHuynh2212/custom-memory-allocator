@@ -1,6 +1,6 @@
 Custom-malloc
 
-A custom implementation of malloc, free, realloc, and calloc in C- built to explore memory management in low level
+A custom implementation of malloc, free, realloc, and calloc in C reference by dlmalloc and glibc - built to explore memory management in low level
 
 Features
 
