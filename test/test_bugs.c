@@ -20,11 +20,11 @@ void test_grow_top_topsize_stays_synced(void)
     my_free(b);
 }
 
-void test_top_carve_payload_matches_request(void)
+void test_top_carve_payload_matches_request(void)   
 {
     heap_init();
     void *p = my_malloc(200);
-    check_heap();
+    check_malloc_state((struct malloc_state*)debug_get_state());
     printf("test_top_carve_payload_matches_request: PASS\n");
 
     my_free(p);
@@ -113,7 +113,7 @@ void test_descending_order_bin(void)
     my_free(c);
     my_free(d);
 
-    check_heap_bin_consistency();
+    check_malloc_state((struct malloc_state*)st);
 
     const list *head = &st->bins[idx1];
     assert(list_length(head) == 5);
@@ -163,7 +163,7 @@ void test_descending_order_bin(void)
     my_free(dup1);
     my_free(dup2);
 
-    check_heap_bin_consistency();
+    check_malloc_state((struct malloc_state*)st);
 
     const list *head2 = &st->bins[idx2];
     assert(list_length(head2) == 2);
@@ -219,10 +219,6 @@ void test_non_deterministic_crash(void)
 int main()
 {
     test_non_deterministic_crash(); 
-
-    int idx = get_bin(4096);
-
-    printf("Idx is %d\n", idx);
 
     return 0;
 }

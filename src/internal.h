@@ -85,6 +85,7 @@ typedef struct malloc_state {
 
 #define ok_address(state, a) \
     ((char*)(a) >= (state)->heap_start && (char*)(a) <= (state)->heap_end) 
+    
 // function prototypes
 void heap_init(void);
 mblockptr *find_suitable_block(size_t request_size);
