@@ -476,7 +476,7 @@ void *my_realloc(void *ptr, size_t size)
                 // try_expand may move the data to previous address, to ensure we return correct address of the data, use block + 1
             }
         }
-
+        pthread_mutex_unlock(&global_lock);
     }
     else
     {

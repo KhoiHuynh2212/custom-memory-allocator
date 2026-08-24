@@ -1,41 +1,7 @@
-/*
- * test-edge-cases.c - edge case / robustness suite for my-malloc
- 
- * Run:
- *   ./test/test-edge-cases            (normal output)
- *   ./test/test-edge-cases -v         (verbose: prints internal block state)
- *
- * DESIGN NOTES (production techniques used here):
- *
- *  - Registry-driven, fork-per-test isolation: every test is registered
- *    once in `tests[]` and run in its own forked child process. If a test
- *    segfaults or aborts unexpectedly, only that child dies -- the parent
- *    sees it via waitpid(), reports it as a failure, and moves on to the
- *    next test instead of losing the rest of the suite's results.
- *  - Nested death-test isolation: test_double_free() additionally forks
- *    *inside itself* via run_isolated(), because that test's whole point
- *    is to confirm a SIGABRT happens on purpose. This nests cleanly inside
- *    the outer per-test fork -- the outer fork protects the suite from
- *    surprise crashes, the inner fork lets one specific test catch an
- *    *intentional* crash and turn it into a normal CHECK() pass/fail.
- *  - Shared-memory counters: because CHECK() may now run inside a forked
- *    child, the pass/fail counters live in an mmap(MAP_SHARED) region so
- *    every generation of child can update them and the parent still sees
- *    the final tally after all children exit.
- *  - White-box inspection: Block is a fully defined (non-opaque) struct
- *    in my-malloc.h, so several tests reach past the malloc/free API and
- *    directly inspect ->payload/->free/->list to confirm internal
- *    invariants (e.g. "did split() actually happen or not").
- *  - Canary/guard-byte checks: payloads are bracketed with sentinel bytes
- *    and re-verified after unrelated allocator activity, to catch heap
- *    metadata bleeding into user data.
- *  - Deterministic PRNG with a printed seed, so a failing fuzz run can be
- *    reproduced exactly by re-running with the same seed.
- *  - Structured pass/fail accounting + non-zero exit code on failure, so
- *    this is CI-friendly (`make test && echo ok`).
- */
-
-#include "my-malloc.h"
+#include "../include/my-malloc.h"
+#include "../src/internal.h"
+#include "../src/list.h"
+#include "../src/debug.h" /* build with -DDEBUG: needs debug_get_state() */
 #include <stdint.h>
 #include <stdarg.h>
 #include <unistd.h>
@@ -44,9 +10,6 @@
 #include <signal.h>
 #include <time.h>
 
-/* ------------------------------------------------------------------ */
-/* Tiny test framework                                                 */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     int checks_run;
@@ -98,21 +61,7 @@ static void vlog(const char *fmt, ...)
     va_end(ap);
 }
 
-/*
- * run_isolated - run @fn in a forked child so an abort()/segfault in it
- * doesn't take down the whole test binary.
- *
- * This is a *nested* fork: it's called from inside a test function that
- * is itself already running inside the outer per-test child forked by
- * main(). That's fine -- shared memory survives across nested forks, and
- * each layer is protecting against a different thing (outer: a surprise
- * crash anywhere; inner: confirming an *intentional* crash happens).
- *
- * Returns:
- *   1 if the child exited normally with status 0
- *   0 if the child exited normally with nonzero status
- *  -1 if the child was killed by a signal (out-param *signo set)
- */
+/* run_isolated - run @fn in a forked child so an abort()/segfault in it */
 static int run_isolated(void (*fn)(void), int *signo)
 {
     fflush(stdout);
@@ -137,28 +86,17 @@ static int run_isolated(void (*fn)(void), int *signo)
 }
 
 /* ------------------------------------------------------------------ */
-/* Helpers                                                             */
+/* Helpers */
 /* ------------------------------------------------------------------ */
 
 static mblockptr *hdr_of(void *ptr) { return (mblockptr *)ptr - 1; }
 
-static int is_aligned(const void *ptr)
+static int ptr_is_aligned(const void *ptr)
 {
-    return ((uintptr_t)ptr % ALIGN) == 0;
+    return ((uintptr_t)ptr % align) == 0;
 }
 
-/* watchdog_arm/disarm - guard against an internal infinite loop.
- *
- * A corrupted free list (e.g. a stale rover pointing into memory that
- * got coalesced out from under it) is exactly as likely to manifest as
- * a hang inside find_suitable_block()'s do/while as it is a crash. Since
- * each test already runs inside its own forked child (see main()), a
- * hang there would otherwise wedge that child forever with no crash for
- * waitpid() to report -- the parent would just block. Arm a short alarm
- * before any operation suspected of being able to loop forever; the
- * handler _exit()s so the outer fork/waitpid harness still sees a clean
- * (nonzero-status) failure instead of a stuck test run.
- */
+/* watchdog_arm/disarm - guard against an internal infinite loop. */
 static void watchdog_fired(int signo)
 {
     (void)signo;
@@ -178,61 +116,21 @@ static void watchdog_disarm(void)
     alarm(0);
 }
 
-/*
- * walk_free_ring_from - traverse the circular free list starting from a
- * node known to currently be free, and validate every node visited.
- *
- * The list is circular and includes the private sentinel `head`, which
- * this test file has no direct pointer to -- but since the ring is
- * circular, starting from *any* live node and following ->next until we
- * arrive back at that same node necessarily visits the sentinel plus
- * every free block, without needing access to `head` itself.
- *
- * This exists to directly probe the concern that a merge (coalesce() or
- * try_expand()'s three-way path) could leave a stale/ghost list node
- * behind -- e.g. curr's old header memory still linked into the ring
- * after its bytes became part of the merged payload. A ghost node would
- * show up here as: an entry that isn't actually free (free bit clear,
- * since real payload bytes would rarely coincidentally set it), a
- * next/prev pair that isn't symmetric, or a ring that never returns to
- * the start (infinite loop, caught by the visited-count cap below).
- *
- * Returns the number of free blocks visited (excluding the sentinel), or
- * -1 if the ring is asymmetric or doesn't close within a generous cap.
- */
-static int walk_free_ring_from(list *start)
+/* bin_holds_exactly - true if target is the sole entry in its own bin */
+static int bin_holds_exactly(const malloc_state *state, mblockptr *target)
 {
-    enum { MAX_NODES = 100000 }; /* generous cap -- a real cycle should be far smaller */
-    int free_count = 0;
-    list *node = start;
-    int steps = 0;
+    int idx = get_bin(target->payload);
+    int count = 0;
+    int found = 0;
+    mblockptr *curr;
 
-    do {
-        if (node->next->prev != node || node->prev->next != node) {
-            return -1; /* asymmetric link: corruption */
-        }
-
-        /* Distinguish the sentinel (payload == 0, never marked free) from
-         * a real free block by reinterpreting the node as a Block, which
-         * is valid because every list node in this allocator is always
-         * embedded inside a Block. */
-        mblockptr *b = list_entry(node, mblockptr, list);
-        if (!(b->payload == 0 && !IS_FREE(b))) {
-            if (!IS_FREE(b)) {
-                return -1; /* a non-free, non-sentinel node is on the free ring */
-            }
-            free_count++;
-        }
-
-        node = node->next;
-        steps++;
-    } while (node != start && steps < MAX_NODES);
-
-    if (node != start) {
-        return -1; /* never closed the ring -- corruption or true infinite structure */
+    list_for_each_entry(curr, &state->bins[idx], list)
+    {
+        count++;
+        if (curr == target) found = 1;
     }
 
-    return free_count;
+    return (count == 1 && found) ? 1 : 0;
 }
 
 /* Fill a buffer with a repeating byte pattern derived from a seed. */
@@ -250,7 +148,7 @@ static int check_pattern(const unsigned char *buf, size_t n, unsigned char seed)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: NULL handling                                            */
+/* Edge case: NULL handling */
 /* ------------------------------------------------------------------ */
 
 static void test_null_handling(void)
@@ -269,7 +167,7 @@ static void test_null_handling(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: double free must be caught, not silently corrupt memory  */
+/* Edge case: double free must be caught, not silently corrupt memory */
 /* ------------------------------------------------------------------ */
 
 static void child_double_free(void)
@@ -277,8 +175,7 @@ static void child_double_free(void)
     void *p = my_malloc(64);
     my_free(p);
     my_free(p); /* should abort() the second time */
-    /* If we get here, double-free was NOT detected -> exit nonzero
-     * so the parent sees this as a failure, not a false pass. */
+    /* If we get here, double-free was NOT detected -> exit nonzero */
     _exit(1);
 }
 
@@ -295,7 +192,7 @@ static void test_double_free(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: alignment guarantees                                     */
+/* Edge case: alignment guarantees */
 /* ------------------------------------------------------------------ */
 
 static void test_alignment(void)
@@ -307,17 +204,17 @@ static void test_alignment(void)
 
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
         void *p = my_malloc(sizes[i]);
-        if (!p || !is_aligned(p)) {
+        if (!p || !ptr_is_aligned(p)) {
             all_aligned = 0;
-            vlog("size=%zu ptr=%p NOT aligned to %zu", sizes[i], p, (size_t)ALIGN);
+            vlog("size=%zu ptr=%p NOT aligned to %zu", sizes[i], p, (size_t)align);
         }
         my_free(p);
     }
-    CHECK(all_aligned, "every returned pointer is aligned to ALIGN (max_align_t)");
+    CHECK(all_aligned, "every returned pointer is aligned to align (max_align_t)");
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: zero-size interactions                                   */
+/* Edge case: zero-size interactions */
 /* ------------------------------------------------------------------ */
 
 static void test_zero_size_variants(void)
@@ -337,30 +234,22 @@ static void test_zero_size_variants(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: split threshold (MIN_FREE_BLOCK boundary)                 */
+/* Edge case: split threshold (MIN_FREE_BLOCK boundary) */
 /* ------------------------------------------------------------------ */
 
 static void test_split_threshold(void)
 {
     SECTION("split threshold at MIN_FREE_BLOCK boundary");
 
-    /* Get a free block of a known, STABLE payload by allocating it with
-     * an allocated "guard" block immediately after it. Without the guard,
-     * freeing p1 would forward-coalesce with whatever free space happens
-     * to sit after it (e.g. heap_init's leftover chunk), silently
-     * inflating its payload before we ever get to measure it. */
+    /* Get a free block of a known, STABLE payload by allocating it with */
     void *p1 = my_malloc(256);
-    void *guard1 = my_malloc(ALIGN); /* blocks forward coalescing of p1 */
+    void *guard1 = my_malloc(align); /* blocks forward coalescing of p1 */
     CHECK(p1 != NULL && guard1 != NULL, "my_malloc(256) + guard succeed");
     size_t original_payload = hdr_of(p1)->payload;
     my_free(p1);
 
-    /* Request just small enough that leftover < MIN_FREE_BLOCK.
-     * ALIGN_UP granularity is ALIGN bytes, so shrinking by one alignment
-     * step (which is less than MIN_FREE_BLOCK on any sane build) should
-     * NOT trigger a split -- the allocator should hand back the whole
-     * block, oversized, rather than create an unusably tiny free node. */
-    size_t tiny_shrink = original_payload - ALIGN;
+    /* Request just small enough that leftover < MIN_FREE_BLOCK. */
+    size_t tiny_shrink = original_payload - align;
     void *p2 = my_malloc(tiny_shrink);
     CHECK(p2 == p1, "reused the same block for a slightly smaller request");
     CHECK(hdr_of(p2)->payload == original_payload,
@@ -371,16 +260,15 @@ static void test_split_threshold(void)
     my_free(p2);
     my_free(guard1);
 
-    /* Now request small enough that a split SHOULD happen -- same guard
-     * trick to keep the baseline payload stable and measurable. */
+    /* Now request small enough that a split SHOULD happen -- same guard */
     void *p3 = my_malloc(256);
-    void *guard2 = my_malloc(ALIGN);
+    void *guard2 = my_malloc(align);
     size_t big_payload = hdr_of(p3)->payload;
     my_free(p3);
 
-    size_t big_shrink = big_payload > (MINBLOCKSIZE + ALIGN)
-                             ? big_payload - MINBLOCKSIZE - ALIGN
-                             : ALIGN;
+    size_t big_shrink = big_payload > (MINBLOCKSIZE + align)
+                             ? big_payload - MINBLOCKSIZE - align
+                             : align;
     void *p4 = my_malloc(big_shrink);
     CHECK(p4 == p3, "reused the same block for the split-eligible request");
     CHECK(hdr_of(p4)->payload < big_payload,
@@ -392,17 +280,14 @@ static void test_split_threshold(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: forward / backward / three-way coalescing                */
+/* Edge case: forward / backward / three-way coalescing */
 /* ------------------------------------------------------------------ */
 
 static void test_forward_coalesce(void)
 {
     SECTION("forward coalescing: free(c) then free(b), b absorbs c");
 
-    /* Four adjacent blocks so the merge under test (b absorbing c) is
-     * bounded on both sides by still-allocated blocks and can't cascade
-     * into 'a' or past 'd'. Each of a/b/c/d is freed exactly once across
-     * this function. */
+    /* Four adjacent blocks so the merge under test (b absorbing c) is */
     void *a = my_malloc(64);
     void *b = my_malloc(64);
     void *c = my_malloc(64);
@@ -410,9 +295,7 @@ static void test_forward_coalesce(void)
     CHECK(a && b && c && d, "four adjacent allocations succeed");
 
     my_free(c); /* c isolated: neighbors b (alloc) and d (alloc) -> no merge */
-    my_free(b); /* b's forward neighbor c is now free -> FORWARD merge:
-                   b absorbs c. b's backward neighbor a is allocated ->
-                   no backward merge, so this exercises forward-only. */
+    my_free(b); /* b's forward neighbor c is now free -> FORWARD merge: */
 
     void *big = my_malloc(64 + 64 + HEADER_SIZE + FOOTER_SIZE - 8);
     CHECK(big != NULL, "allocation spanning b+c's merged region succeeds");
@@ -433,9 +316,7 @@ static void test_backward_coalesce(void)
     CHECK(a && b && c, "three adjacent allocations succeed");
 
     my_free(a); /* a alone in free list, no free neighbor yet */
-    my_free(b); /* b's forward neighbor c is allocated -> no forward merge
-                   b's backward neighbor a is free -> BACKWARD merge:
-                   coalesce() should return 'a', absorbing b into it */
+    my_free(b); /* b's forward neighbor c is allocated -> no forward merge */
 
     CHECK(list_is_linked(&hdr_of(a)->list),
           "'a' remains linked in the free list after absorbing 'b' "
@@ -458,11 +339,9 @@ static void test_three_way_coalesce(void)
     void *d = my_malloc(48); /* trailing allocated block bounds the region */
     CHECK(a && b && c && d, "four adjacent allocations succeed");
 
-    my_free(a); /* isolated free block            */
+    my_free(a); /* isolated free block */
     my_free(c); /* isolated free block (not adjacent to a) */
-    my_free(b); /* b sits between two free blocks:
-                   forward merge absorbs c into b, then backward merge
-                   absorbs (b+c) into a -> single a+b+c block            */
+    my_free(b); /* b sits between two free blocks: */
 
     void *big = my_malloc(48 * 3 + HEADER_SIZE * 2 + FOOTER_SIZE * 2 - 8);
     CHECK(big == a, "single allocation spans the fully-merged a+b+c region");
@@ -472,30 +351,20 @@ static void test_three_way_coalesce(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: allocation bigger than CHUNK_SIZE forces sbrk extension   */
+/* Edge case: allocation bigger than CHUNK_SIZE forces sbrk extension */
 /* ------------------------------------------------------------------ */
 
 static void test_large_allocation_extends_heap(void)
 {
     SECTION("allocation larger than CHUNK_SIZE (still under MMAP_THRESHOLD)");
 
-    /* BUG FOUND DURING REVIEW: this test originally requested
-     * CHUNK_SIZE * 3 (192 KB), which is *larger* than MMAP_THRESHOLD
-     * (128 KB). Despite the test's name and comment claiming it forces
-     * "extra sbrk", my_malloc's own threshold check routes any size
-     * >= MMAP_THRESHOLD straight to mmap -- so the original test was
-     * silently exercising the mmap path (duplicating test_mmap_*
-     * coverage) and never touched extend_heap()'s sbrk path at all.
-     * It still passed, because mmap'd memory is writable too -- the
-     * mislabeling was invisible without inspecting IS_MMAP(). Fixed by
-     * picking a size that is > CHUNK_SIZE but strictly < MMAP_THRESHOLD,
-     * and asserting the block is NOT mmap'd to lock in the intent. */
+    /* BUG FOUND DURING REVIEW: this test originally requested */
     size_t big_size = CHUNK_SIZE + (CHUNK_SIZE / 2); /* 96 KB: > CHUNK_SIZE, < MMAP_THRESHOLD */
     CHECK(big_size < MMAP_THRESHOLD, "sanity: test size stays under MMAP_THRESHOLD");
 
     void *p = my_malloc(big_size);
     CHECK(p != NULL, "my_malloc(1.5 * CHUNK_SIZE) succeeds via sbrk");
-    CHECK(!IS_MMAP(hdr_of(p)), "allocation actually took the sbrk path, not mmap");
+    CHECK(!is_mmap(hdr_of(p)), "allocation actually took the sbrk path, not mmap");
 
     memset(p, 0x7E, big_size);
     unsigned char *bytes = p;
@@ -509,47 +378,30 @@ static void test_large_allocation_extends_heap(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: exact-fit sbrk allocation must NOT attempt to split       */
-/* (the [CHUNK_SIZE, MMAP_THRESHOLD) gap)                              */
+/* Edge case: exact-fit sbrk allocation must NOT attempt to split */
 /* ------------------------------------------------------------------ */
 
 static void test_extend_heap_exact_fit_no_split(void)
 {
-    SECTION("extend_heap: exact-fit allocation in [CHUNK_SIZE, MMAP_THRESHOLD) does not split");
+    SECTION("grow_top: exact-fit allocation in [CHUNK_SIZE, MMAP_THRESHOLD) does not split");
 
-    /* extend_heap() picks allocate_size as:
-     *   (size < CHUNK_SIZE) ? CHUNK_SIZE : size + HEADER_SIZE + FOOTER_SIZE
-     *
-     * For any request whose ALIGN_UP'd size falls in
-     * [CHUNK_SIZE, MMAP_THRESHOLD), the sbrk chunk requested from the OS
-     * is sized to *exactly* fit the request (no slack for a remainder
-     * block). That makes payload == request_size on the new block,
-     * which fails the "payload >= request_size + MIN_FREE_BLOCK" split
-     * test in my_malloc() by exactly MIN_FREE_BLOCK bytes every time.
-     *
-     * This code path is marked in my-malloc.c with a comment claiming
-     * "never reach this branch possible" -- that comment is WRONG. Any
-     * single allocation request in this ~64KB-128KB window, when no
-     * existing free block satisfies it, hits this branch on every run.
-     * This test locks in the actual (correct) behavior of that branch
-     * and guards against the comment's mistaken belief ever being acted
-     * on (e.g. by someone "cleaning up" what looks like dead code). */
+    /* grow_top() picks allocate_size as: */
 
     size_t request = CHUNK_SIZE + 1000; /* squarely inside the gap */
-    CHECK(request >= (size_t)CHUNK_SIZE && ALIGN_UP(request) < (size_t)MMAP_THRESHOLD,
+    CHECK(request >= (size_t)CHUNK_SIZE && align_up(request) < (size_t)MMAP_THRESHOLD,
           "sanity: request lands inside [CHUNK_SIZE, MMAP_THRESHOLD)");
 
     void *p = my_malloc(request);
     CHECK(p != NULL, "exact-fit allocation in the gap succeeds");
 
     mblockptr *b = hdr_of(p);
-    CHECK(b->payload == ALIGN_UP(request),
+    CHECK(b->payload == align_up(request),
           "payload matches the aligned request exactly -- no split occurred, "
           "confirming this is the exact-fit branch and not a lucky reuse "
           "of a larger free block");
     CHECK(!list_is_linked(&b->list),
           "the exact-fit block is allocated, not sitting on the free list");
-    CHECK(!IS_MMAP(b), "still served from the sbrk heap, not mmap (below MMAP_THRESHOLD)");
+    CHECK(!is_mmap(b), "still served from the sbrk heap, not mmap (below MMAP_THRESHOLD)");
 
     size_t *footer = (size_t *)((char *)(b + 1) + b->payload);
     CHECK(*footer == b->payload, "footer is consistent with the exact-fit payload");
@@ -559,14 +411,12 @@ static void test_extend_heap_exact_fit_no_split(void)
 
     my_free(p);
 
-    /* Same scenario again, but this time via a *second* call after the
-     * free list has a stale/empty state from the block above -- makes
-     * sure this isn't a first-allocation-only quirk. */
-    void *guard = my_malloc(64); /* occupies the freed block, forcing a fresh extend_heap */
+    /* Same scenario again, but this time via a *second* call after the */
+    void *guard = my_malloc(64); /* occupies the freed block, forcing a fresh grow_top() call */
     void *q = my_malloc(CHUNK_SIZE + 500);
     CHECK(q != NULL, "second exact-fit allocation in the gap also succeeds");
     mblockptr *bq = hdr_of(q);
-    CHECK(bq->payload == ALIGN_UP((size_t)(CHUNK_SIZE + 500)),
+    CHECK(bq->payload == align_up((size_t)(CHUNK_SIZE + 500)),
           "second exact-fit block also lands with no split");
 
     my_free(q);
@@ -610,8 +460,7 @@ static void test_many_extensions_stay_consistent(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: realloc must actually relocate when it can't expand       */
-/* in place (neighbor is allocated, not free)                          */
+/* Edge case: realloc must actually relocate when it can't expand */
 /* ------------------------------------------------------------------ */
 
 static void test_realloc_forced_relocation(void)
@@ -635,13 +484,7 @@ static void test_realloc_forced_relocation(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: try_expand in-place growth (forward / backward / 3-way)  */
-/*                                                                      */
-/* These target try_expand() specifically -- the realloc-time sibling  */
-/* of coalesce() that can relocate the block via memmove() when it     */
-/* merges backward. Correctness here hinges on getting the merged      */
-/* block's address, its list membership, and every byte of moved data  */
-/* right -- a bug in any of those is silent corruption, not a crash.   */
+/* Edge case: try_expand in-place growth (forward / backward / 3-way) */
 /* ------------------------------------------------------------------ */
 
 static void test_try_expand_forward_only(void)
@@ -672,16 +515,12 @@ static void test_try_expand_backward_only(void)
 {
     SECTION("try_expand: backward-only merge relocates via memmove, data intact");
 
-    /* SZ is deliberately bigger than HEADER_SIZE + FOOTER_SIZE, so the
-     * memmove's source and destination ranges genuinely overlap -- this
-     * is the exact scenario that requires memmove() instead of memcpy(),
-     * since memcpy() on overlapping regions is undefined behavior. */
+    /* SZ is deliberately bigger than HEADER_SIZE + FOOTER_SIZE, so the */
     enum { SZ = 256 };
 
     void *a = my_malloc(SZ);
     void *b = my_malloc(SZ);
-    void *c = my_malloc(SZ); /* blocks b's forward neighbor, so only the
-                                 backward path under test can fire */
+    void *c = my_malloc(SZ); /* blocks b's forward neighbor, so only the */
     CHECK(a && b && c, "three adjacent allocations succeed");
 
     unsigned char *bytes = b;
@@ -702,7 +541,7 @@ static void test_try_expand_backward_only(void)
 
     CHECK(!list_is_linked(&hdr_of(b2)->list),
           "absorbed-and-grown block is allocated -- not on the free list");
-    CHECK(!IS_FREE(hdr_of(b2)), "merged block's free bit is cleared");
+    CHECK(!is_free(hdr_of(b2)), "merged block's free bit is cleared");
 
     size_t *footer = (size_t *)((char *)(hdr_of(b2) + 1) + hdr_of(b2)->payload);
     CHECK(*footer == hdr_of(b2)->payload,
@@ -749,17 +588,14 @@ static void test_try_expand_split_after_merge(void)
     fill_pattern(b, 64, 0x99);
     my_free(c); /* free neighbor, far bigger than what we'll actually request */
 
-    /* Ask for only slightly more than b's original size. The forward
-     * merge finds much more space than needed, so the remainder should
-     * be split back out into a reusable free block, not folded wastefully
-     * into b2's payload. */
-    void *b2 = my_realloc(b, 64 + ALIGN);
+    /* Ask for only slightly more than b's original size. The forward */
+    void *b2 = my_realloc(b, 64 + align);
     CHECK(b2 == b, "small growth still expands in place via forward merge");
     CHECK(check_pattern(b2, 64, 0x99), "original bytes preserved");
     CHECK(hdr_of(b2)->payload < 64 + 64 + HEADER_SIZE + FOOTER_SIZE,
           "leftover space was split off, not left folded into b2's payload");
 
-    void *reuse = my_malloc(ALIGN);
+    void *reuse = my_malloc(align);
     CHECK(reuse != NULL, "split-off remainder is available for a fresh allocation");
 
     my_free(a);
@@ -779,9 +615,7 @@ static void test_try_expand_insufficient_falls_back(void)
 
     fill_pattern(b, 64, 0x33);
     my_free(a);
-    my_free(c); /* both neighbors free, but nowhere near enough combined --
-                    try_expand must report "not enough", not hand back an
-                    undersized block */
+    my_free(c); /* both neighbors free, but nowhere near enough combined -- */
 
     void *big = my_realloc(b, 8192);
     CHECK(big != NULL, "realloc for a size far beyond any local merge still succeeds "
@@ -796,18 +630,9 @@ static void test_try_expand_no_prev_at_heap_start(void)
 {
     SECTION("try_expand: no out-of-bounds read when there is no previous block");
 
-    /* This runs as the first allocator call in its own forked child, which
-     * inherits the heap exactly as heap_init() left it -- so this malloc
-     * carves off the very start of the initial free block, meaning the
-     * returned block sits at heap_start with nothing behind it. The
-     * backward-merge check in try_expand walks to (char*)curr - FOOTER_SIZE
-     * to read a footer that, for this block, does not exist; it must be
-     * guarded by the heap_start comparison rather than assumed safe.
-     * Build this binary with -fsanitize=address for a hard guarantee this
-     * isn't quietly reading before the mapped region. */
+    /* This runs as the first allocator call in its own forked child, which */
     void *p = my_malloc(64);
-    void *guard = my_malloc(64); /* blocks the forward path too, so only the
-                                     backward boundary check is exercised */
+    void *guard = my_malloc(64); /* blocks the forward path too, so only the */
     CHECK(p && guard, "first two allocations of the heap succeed");
 
     fill_pattern(p, 64, 0x7A);
@@ -822,7 +647,7 @@ static void test_try_expand_no_prev_at_heap_start(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: canary / guard bytes survive unrelated allocator churn    */
+/* Edge case: canary / guard bytes survive unrelated allocator churn */
 /* ------------------------------------------------------------------ */
 
 static void test_canary_survival(void)
@@ -840,9 +665,7 @@ static void test_canary_survival(void)
         b[SZ - 1] = (unsigned char)(0xD0 + i); /* back canary */
     }
 
-    /* Churn: allocate/free a bunch of unrelated blocks of varying sizes
-     * in between, the kind of activity most likely to reveal an
-     * allocator that lets metadata bleed into neighboring payloads. */
+    /* Churn: allocate/free a bunch of unrelated blocks of varying sizes */
     for (int round = 0; round < 8; round++) {
         void *tmp[8];
         for (int i = 0; i < 8; i++) {
@@ -873,19 +696,7 @@ static void test_heap_shrink_boundary(void)
 {
     SECTION("heap shrinkage never retreats past the starting program break");
 
-    /* heap_init() only runs once, in main(), before any test is forked.
-     * Every test child inherits that already-established break, so
-     * sbrk(0) right here IS "the initial starting heap address" -- the
-     * floor sbrk must never dip below, no matter how aggressively free()
-     * tries to give memory back to the OS.
-     *
-     * Important: heap_init() itself already reserves one full
-     * MMAP_THRESHOLD-sized free block via a single sbrk() call. Small
-     * allocations (a few KB) are satisfied entirely out of that reserve
-     * and never touch sbrk again -- so to actually force *new* growth
-     * past the floor, requests need to exceed that initial free
-     * capacity in aggregate. Each individual request is kept just under
-     * MMAP_THRESHOLD so it stays on the sbrk path instead of mmap. */
+    /* heap_init() only runs once, in main(), before any test is forked. */
     void *heap_floor = sbrk(0);
 
     enum { N = 3 };
@@ -904,10 +715,7 @@ static void test_heap_shrink_boundary(void)
     CHECK(heap_grown > heap_floor,
           "heap actually grew past the floor (sanity check: the test is exercising growth)");
 
-    /* Free everything. The last free() of a big trailing block is the
-     * one most likely to trigger a give-back-to-the-OS shrink -- that's
-     * exactly the path that can over-subtract and walk the break past
-     * where the arena actually started. */
+    /* Free everything. The last free() of a big trailing block is the */
     for (int i = 0; i < N; i++) {
         my_free(ptrs[i]);
     }
@@ -920,47 +728,36 @@ static void test_heap_shrink_boundary(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Threshold transition: MMAP_THRESHOLD routes to mmap, not sbrk       */
+/* Threshold transition: MMAP_THRESHOLD routes to mmap, not sbrk */
 /* ------------------------------------------------------------------ */
 
 static void test_mmap_threshold_transitions(void)
 {
     SECTION("MMAP_THRESHOLD boundary routes to mmap, and resizing tracks it");
 
-    /* One alignment step under threshold: must stay on the sbrk/heap
-     * arena. Note this is MMAP_THRESHOLD - ALIGN, not - 1: the size is
-     * ALIGN_UP()'d *before* the mmap-threshold check runs, and
-     * MMAP_THRESHOLD is itself a multiple of ALIGN, so anything in
-     * (MMAP_THRESHOLD - ALIGN, MMAP_THRESHOLD) rounds up and crosses
-     * into the mmap branch anyway. */
-    void *below = my_malloc(MMAP_THRESHOLD - ALIGN);
+    /* One alignment step under threshold: must stay on the sbrk/heap */
+    void *below = my_malloc(MMAP_THRESHOLD - align);
     CHECK(below != NULL, "allocation just under MMAP_THRESHOLD succeeds");
-    CHECK(!IS_MMAP(hdr_of(below)),
+    CHECK(!is_mmap(hdr_of(below)),
           "size just under MMAP_THRESHOLD is served from the sbrk heap, not mmap");
 
     /* Exactly at threshold: this is the documented cutover point. */
     void *at = my_malloc(MMAP_THRESHOLD);
     CHECK(at != NULL, "allocation of exactly MMAP_THRESHOLD succeeds");
-    CHECK(IS_MMAP(hdr_of(at)), "size == MMAP_THRESHOLD is routed to mmap");
-    CHECK(is_aligned(at), "mmap'd payload is still correctly aligned");
+    CHECK(is_mmap(hdr_of(at)), "size == MMAP_THRESHOLD is routed to mmap");
+    CHECK(ptr_is_aligned(at), "mmap'd payload is still correctly aligned");
 
     fill_pattern(at, MMAP_THRESHOLD, 0x3C);
 
-    /* Grow further: a correct implementation should extend the existing
-     * mapping (mremap) rather than silently falling back to a fresh
-     * sbrk block + copy, so the block should still read as mmap'd. */
+    /* Grow further: a correct implementation should extend the existing */
     void *grown = my_realloc(at, MMAP_THRESHOLD * 2);
     CHECK(grown != NULL, "growing an mmap'd block succeeds");
-    CHECK(IS_MMAP(hdr_of(grown)),
+    CHECK(is_mmap(hdr_of(grown)),
           "growing an already-mmap'd block keeps it mmap-backed (mremap path)");
     CHECK(check_pattern(grown, MMAP_THRESHOLD, 0x3C),
           "original bytes survive the grow-resize");
 
-    /* Shrink back under the threshold. Whether your implementation
-     * munmaps and hands back a fresh sbrk block here, or just keeps the
-     * mapping via mremap regardless of size, is a real design choice --
-     * pick whichever your allocator does and tighten the CHECK below to
-     * match (e.g. CHECK(!IS_MMAP(hdr_of(shrunk)), ...) if you munmap). */
+    /* Shrink back under the threshold. Whether your implementation */
     void *shrunk = my_realloc(grown, 64);
     CHECK(shrunk != NULL, "shrinking an mmap'd block down succeeds");
     CHECK(check_pattern(shrunk, 64, 0x3C), "surviving bytes preserved through the shrink");
@@ -970,15 +767,10 @@ static void test_mmap_threshold_transitions(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Structural poisoning: footer size must always match header payload  */
+/* Structural poisoning: footer size must always match header payload */
 /* ------------------------------------------------------------------ */
 
-/* Reads the boundary-tag footer that sits right after a block's payload
- * (see BLOCK_NEXT_HEADER in my-malloc.h: header | payload | footer |
- * next-header). If split()/coalesce() ever update the header's payload
- * without rewriting the matching footer, this is what catches it -- a
- * stale footer is exactly what makes backward coalescing walk into the
- * wrong place next time a neighbor is freed. */
+/* Reads the boundary-tag footer that sits right after a block's payload */
 static size_t block_footer_value(mblockptr *b)
 {
     return *(size_t *)((char *)(b + 1) + b->payload);
@@ -1004,9 +796,7 @@ static void test_footer_payload_consistency(void)
     CHECK(footers_ok,
           "footer size_t immediately after each payload equals that block's header->payload");
 
-    /* Free a couple of interior blocks, which forces split/coalesce to
-     * rewrite footers -- confirm the footer still tracks the (possibly
-     * merged) payload afterward, not a stale pre-merge value. */
+    /* Free a couple of interior blocks, which forces split/coalesce to */
     my_free(ptrs[1]);
     my_free(ptrs[3]);
 
@@ -1021,9 +811,7 @@ static void test_footer_payload_consistency(void)
     }
     CHECK(list_ok, "remaining allocated blocks are not linked into the free list after neighbor frees");
 
-    /* Direct doubly-linked-list symmetry check on a freed node: this is
-     * the structural half of "structural poisoning" -- next->prev and
-     * prev->next must both point back to the node itself. */
+    /* Direct doubly-linked-list symmetry check on a freed node: this is */
     void *fp = my_malloc(64);
     my_free(fp);
     mblockptr *fb = hdr_of(fp);
@@ -1037,7 +825,7 @@ static void test_footer_payload_consistency(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Fuzz-style stress test with checksummed data and mixed operations   */
+/* Fuzz-style stress test with checksummed data and mixed operations */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -1092,7 +880,6 @@ static void test_fuzz_mixed_ops_seeded(unsigned seed)
                 break;
             }
             /* fallthrough to alloc if slot was empty */
-            /* fall through */
         default: { /* 0, 3, and realloc-fallthrough: fresh allocation */
             if (slots[idx].live) my_free(slots[idx].ptr);
             size_t sz = (size_t)(rand() % 2000) + 1;
@@ -1118,10 +905,7 @@ static void test_fuzz_mixed_ops_seeded(unsigned seed)
     CHECK(!corruption_found, "no data corruption across 2000 randomized ops");
     CHECK(op_failures == 0, "no unexpected allocation failures during fuzz run");
 
-    /* Design invariant: allocated blocks are never linked into the free
-     * list. If try_expand() or split() ever forgets to unlink an absorbed
-     * or trimmed block, this is what catches it -- corruption_found above
-     * only catches bad *data*, this catches bad *metadata*. */
+    /* Design invariant: allocated blocks are never linked into the free */
     int invariant_ok = 1;
     for (int i = 0; i < SLOTS; i++) {
         if (slots[i].live && list_is_linked(&hdr_of(slots[i].ptr)->list)) {
@@ -1136,32 +920,21 @@ static void test_fuzz_mixed_ops_seeded(unsigned seed)
     }
 }
 
-/* TestCase.fn is void(*)(void), but the fuzz test wants a seed. This thin
- * wrapper draws the seed itself (from the clock) so it still fits the
- * registry's uniform signature -- the seed is printed either way, so a
- * failing run is still exactly reproducible. */
+/* TestCase.fn is void(*)(void), but the fuzz test wants a seed. This thin */
 static void test_fuzz_mixed_ops(void)
 {
     test_fuzz_mixed_ops_seeded((unsigned)time(NULL));
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: three-way merge must not leave a ghost/stale list node    */
+/* Edge case: three-way merge must not leave a ghost/stale list node */
 /* ------------------------------------------------------------------ */
 
 static void test_try_expand_three_way_no_ghost_node(void)
 {
     SECTION("try_expand three-way merge: no stale list node survives the merge");
 
-    /* Same a/b/c/d shape as test_try_expand_three_way(), but here we
-     * additionally walk the *entire* free ring afterward. The specific
-     * worry: try_expand()'s three-way path unlinks prev and next, folds
-     * curr's bytes into prev via memmove, and returns prev -- if curr's
-     * old header (now interior payload bytes of the merged block) were
-     * ever left registered in the ring instead of being cleanly
-     * subsumed, or if prev/next's unlink left a dangling pointer, this
-     * would catch it as an asymmetric link, a "free" bit on a block that
-     * is actually allocated, or a ring that never closes. */
+    /* Same a/b/c/d shape as test_try_expand_three_way(), but here we */
     void *a = my_malloc(48);
     void *b = my_malloc(48);
     void *c = my_malloc(48);
@@ -1185,40 +958,28 @@ static void test_try_expand_three_way_no_ghost_node(void)
     CHECK(!list_is_linked(&hdr_of(big)->list), "merged block is allocated -- not on the free list");
 
     watchdog_arm(5);
-    int ring_count = walk_free_ring_from(&hdr_of(e)->list);
+    int found_exactly_e = bin_holds_exactly((const malloc_state *)debug_get_state(), hdr_of(e));
     watchdog_disarm();
 
-    CHECK(ring_count == 1,
-          "free ring contains exactly the one still-free block ('e') -- "
-          "no ghost node left behind by the merge, no lost/duplicated entries");
-    vlog("free ring visited %d free block(s) after three-way merge", ring_count);
+    CHECK(found_exactly_e,
+          "'e' is the sole entry in its bin -- no ghost node left behind by the merge, "
+          "no lost/duplicated entries");
 
     my_free(big);
-    my_free(d); /* 'd' is adjacent to 'e' and forward-coalesces with it here --
-                   'e' must NOT be freed again after this */
+    my_free(d); /* 'd' is adjacent to 'e' and forward-coalesces with it here -- */
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: freeing the block the internal rover is aimed at, then    */
-/* immediately allocating, must not corrupt or hang the free list       */
+/* Edge case: scattering frees then immediately reallocating must not */
 /* ------------------------------------------------------------------ */
 
-static void test_rover_survives_adjacent_free(void)
+static void test_scattered_free_then_realloc_stays_consistent(void)
 {
-    SECTION("rover: freeing next to the scan cursor then reallocating stays consistent");
+    SECTION("scattered free + immediate malloc stays consistent (no rover in this design -- "
+            "the risk here is find_suitable_block()'s bin scan and insert_large_chunk()'s "
+            "sorted insert, not a stale scan cursor)");
 
-    /* `rover` (my-malloc.c) is a next-fit cursor into the free list.
-     * find_suitable_block() points it at whatever block it just matched,
-     * and every consumer of that match (split(), the full-reuse path in
-     * my_malloc(), coalesce(), try_expand()) resets it back to &head.list
-     * if it's about to remove/merge the exact node rover references --
-     * so by inspection rover should never survive a call pointing at a
-     * block that gets coalesced or reused out from under it. This test
-     * exercises that interleaving directly through the public API,
-     * across many scattered free-list shapes, so a future refactor that
-     * drops one of those resets shows up here as a hang (caught by the
-     * watchdog) or as corrupted/duplicated data (caught by the pattern
-     * checks) rather than as a rare, hard-to-reproduce field failure. */
+    /* This test's original version (previous, non-bin design) targeted a */
 
     enum { N = 12, SZ = 40, ROUNDS = 20 };
     void *ptrs[N];
@@ -1235,18 +996,13 @@ static void test_rover_survives_adjacent_free(void)
         }
         if (!all_ok) break;
 
-        /* Scatter frees so several independent (non-adjacent) free-list
-         * entries exist at once -- this is what gives find_suitable_block
-         * a multi-node ring to move `rover` across in the first place,
-         * rather than a single ever-growing block. */
+        /* Scatter frees so several independent (non-adjacent) free-list */
         for (int i = 0; i < N; i += 2) {
             my_free(ptrs[i]);
             ptrs[i] = NULL;
         }
 
-        /* Immediately allocate again -- this is the moment a stale rover
-         * (if one existed) would be dereferenced by find_suitable_block's
-         * scan. Watchdog guards against a corrupted ring hanging here. */
+        /* Immediately allocate again -- this is the moment a corrupted */
         watchdog_arm(5);
         void *fresh1 = my_malloc(SZ);
         watchdog_disarm();
@@ -1254,11 +1010,7 @@ static void test_rover_survives_adjacent_free(void)
         unsigned char fresh1_seed = (unsigned char)(0xE0 + round);
         fill_pattern(fresh1, SZ, fresh1_seed);
 
-        /* Now free one of the *odd* survivors adjacent to blocks that
-         * were just freed/reused above, then allocate again right away --
-         * this specifically targets "free the block near/at the scan
-         * cursor, then immediately malloc" rather than just scattering
-         * frees at the start. */
+        /* Now free one of the *odd* survivors, then allocate again right */
         int victim = 1; /* an odd index, guaranteed still allocated */
         my_free(ptrs[victim]);
         ptrs[victim] = NULL;
@@ -1270,9 +1022,7 @@ static void test_rover_survives_adjacent_free(void)
         unsigned char fresh2_seed = (unsigned char)(0xB0 + round);
         fill_pattern(fresh2, SZ, fresh2_seed);
 
-        /* Verify every surviving block's data (not just the freshly
-         * touched ones) to catch corruption anywhere in the ring, not
-         * just at the two spots we just poked. */
+        /* Verify every surviving block's data (not just the freshly */
         for (int i = 0; i < N; i++) {
             if (ptrs[i] && !check_pattern(ptrs[i], SZ, seeds[i])) {
                 data_ok = 0;
@@ -1289,36 +1039,30 @@ static void test_rover_survives_adjacent_free(void)
     }
 
     CHECK(all_ok, "all allocations across every round succeeded (no hang, no failure)");
-    CHECK(data_ok, "no data corruption from freeing near the scan cursor and reallocating");
+    CHECK(data_ok, "no data corruption from scattered free/realloc churn");
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: size_t overflow guard at the ALIGN_UP() boundary          */
+/* Edge case: size_t overflow guard at the align_up() boundary */
 /* ------------------------------------------------------------------ */
 
 static void test_malloc_size_overflow_guard(void)
 {
     SECTION("size_t overflow guard around SIZE_MAX rejects unsatisfiable requests");
 
-    /* my_malloc() rejects anything where `size >= SIZE_MAX - (ALIGN - 1)`,
-     * specifically to stop ALIGN_UP() itself (size + ALIGN - 1) from
-     * wrapping around. Probe both sides of that exact boundary. */
-    size_t just_over  = __SIZE_MAX__ - (ALIGN - 1);       /* first rejected value */
+    /* my_malloc() rejects anything where `size >= SIZE_MAX - (align - 1)`, */
+    size_t just_over  = __SIZE_MAX__ - (align - 1);       /* first rejected value */
     size_t just_under = just_over - 1;                     /* largest nominally-allowed value */
 
     CHECK(my_malloc(just_over) == NULL,
-          "size right at the ALIGN_UP overflow boundary is rejected");
+          "size right at the align_up overflow boundary is rejected");
     CHECK(my_malloc(__SIZE_MAX__) == NULL,
           "SIZE_MAX itself is rejected");
 
-    /* just_under passes the ALIGN_UP guard, but is still astronomically
-     * larger than any real system's memory -- mmap should fail for a
-     * legitimate reason (ENOMEM) rather than the request slipping past
-     * validation. We only assert it doesn't corrupt anything; NULL is
-     * the expected, correct outcome on any real machine. */
+    /* just_under passes the align_up guard, but is still astronomically */
     void *p = my_malloc(just_under);
     if (p != NULL) {
-        vlog("my_malloc(SIZE_MAX - ALIGN) unexpectedly succeeded -- "
+        vlog("my_malloc(SIZE_MAX - align) unexpectedly succeeded -- "
              "environment has an implausible amount of virtual memory");
         my_free(p);
     }
@@ -1326,39 +1070,15 @@ static void test_malloc_size_overflow_guard(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* BUG (found during this review): integer overflow in the mmap-path    */
-/* size accounting lets a request that should be rejected instead       */
-/* silently succeed with a far smaller buffer than requested.          */
+/* BUG (found during this review): integer overflow in the mmap-path */
 /* ------------------------------------------------------------------ */
 
 static void test_malloc_mmap_path_integer_overflow(void)
 {
     SECTION("KNOWN BUG: mmap-path total_need calculation can overflow silently");
 
-    /* my_malloc()'s overflow guard only protects ALIGN_UP(size). The
-     * mmap path then computes:
-     *
-     *     total_need = ALIGN_HEADER_FOOTER + request_size;
-     *
-     * with NO further overflow check. For a request_size chosen just
-     * under the ALIGN_UP guard's cutoff (i.e. it legitimately passes
-     * validation), adding ALIGN_HEADER_FOOTER (48 bytes) wraps a 64-bit
-     * size_t around to a tiny value. That tiny value then gets rounded
-     * up to one page and mmap'd -- so my_malloc() returns a NON-NULL
-     * pointer and the caller believes it has ~2^64 bytes, when it
-     * actually has one page (verified experimentally: request ~= SIZE_MAX
-     * yields payload == 4048 bytes). Any caller that trusts the success
-     * return and writes up to their requested size overflows the heap.
-     *
-     * This CHECK is written to describe CORRECT behavior (reject, or if
-     * it succeeds, the payload must be at least what was asked for). It
-     * is expected to FAIL against the current implementation -- that
-     * failure is the point: it's a regression guard for this bug, not a
-     * confirmation that the current code is right.
-     *
-     * Suggested fix: check `request_size > SIZE_MAX - ALIGN_HEADER_FOOTER`
-     * before computing total_need, and return NULL if so. */
-    size_t evil = __SIZE_MAX__ - ALIGN - 8; /* passes ALIGN_UP's guard */
+    /* my_malloc()'s overflow guard only protects align_up(size). The */
+    size_t evil = __SIZE_MAX__ - align - 8; /* passes align_up's guard */
 
     void *p = my_malloc(evil);
     if (p == NULL) {
@@ -1377,7 +1097,7 @@ static void test_malloc_mmap_path_integer_overflow(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: realloc to the same (already-satisfied) size is a no-op   */
+/* Edge case: realloc to the same (already-satisfied) size is a no-op */
 /* ------------------------------------------------------------------ */
 
 static void test_realloc_same_size_noop(void)
@@ -1390,11 +1110,7 @@ static void test_realloc_same_size_noop(void)
 
     size_t original_payload = hdr_of(p)->payload;
 
-    /* Request exactly the block's current usable payload -- this must
-     * take the "request_size <= current_block->payload" shrink-or-noop
-     * path in my_realloc(), and since there's no room to split off a
-     * remainder >= MIN_FREE_BLOCK (we're asking for the whole thing),
-     * it should return the same pointer untouched. */
+    /* Request exactly the block's current usable payload -- this must */
     void *p2 = my_realloc(p, original_payload);
     CHECK(p2 == p, "realloc to the exact current payload returns the same pointer");
     CHECK(hdr_of(p2)->payload == original_payload,
@@ -1405,8 +1121,7 @@ static void test_realloc_same_size_noop(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Edge case: realloc(ptr, 0) frees -- a second free must still be       */
-/* caught as a double free, not silently accepted                     */
+/* Edge case: realloc(ptr, 0) frees -- a second free must still be */
 /* ------------------------------------------------------------------ */
 
 static void child_double_free_via_realloc_zero(void)
@@ -1431,7 +1146,7 @@ static void test_double_free_after_realloc_zero(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Concurrency: global_lock must actually protect concurrent callers    */
+/* Concurrency: global_lock must actually protect concurrent callers */
 /* ------------------------------------------------------------------ */
 
 #include <pthread.h>
@@ -1492,14 +1207,7 @@ static void test_concurrent_alloc_free(void)
 {
     SECTION("thread safety: concurrent malloc/free under global_lock stays consistent");
 
-    /* This is a basic smoke test for the mutex, not a substitute for
-     * running the whole binary under ThreadSanitizer -- but it directly
-     * targets the thing most likely to be wrong in a hand-rolled lock:
-     * data races between threads racing find_suitable_block()/split()/
-     * coalesce() against each other. Each thread only ever touches
-     * pointers it allocated itself, so any observed corruption or
-     * crash must have come from the allocator's shared state, not from
-     * threads stepping on each other's buffers directly. */
+    /* This is a basic smoke test for the mutex, not a substitute for */
     enum { NTHREADS = 6, OPS_PER_THREAD = 500 };
     pthread_t threads[NTHREADS];
     thread_arg_t args[NTHREADS];
@@ -1521,50 +1229,23 @@ static void test_concurrent_alloc_free(void)
     CHECK(total_failures == 0,
           "no data corruption or allocation failures across concurrent threads");
 
-    /* After all threads finish, the allocator itself should still be
-     * usable and its free list should still be walkable (not hung,
-     * not corrupted) -- a real symptom of a race in split()/coalesce()
-     * is a free list that looks fine per-thread but is broken globally. */
+    /* After all threads finish, the allocator itself should still be */
     void *p = my_malloc(128);
     CHECK(p != NULL, "allocator remains usable after concurrent stress");
     my_free(p);
 }
 
 /* ------------------------------------------------------------------ */
-/* Regression: realloc growing a near-threshold sbrk block past         */
-/* MMAP_THRESHOLD must hand off to mmap, not keep extending sbrk        */
+/* Regression: realloc growing a near-threshold sbrk block past */
 /* ------------------------------------------------------------------ */
 
 static void test_realloc_large_growth_from_near_threshold_uses_mmap(void)
 {
     SECTION("realloc: growing a near-threshold sbrk block past MMAP_THRESHOLD converts to mmap");
 
-    /* Regression guard for a real bug found in review: my_realloc()'s
-     * in-place sbrk-extend branch originally gated on `allocated_size`
-     * (the INCREMENT about to be sbrk'd) rather than on `request_size`
-     * (the RESULTING size). When the starting block was already large
-     * (legitimately sbrk'd, just under MMAP_THRESHOLD), the increment
-     * needed to reach a much bigger target could itself stay under
-     * MMAP_THRESHOLD even though the final block blew far past it --
-     * producing a huge block that was still sbrk-backed (IS_MMAP false)
-     * instead of being handed off to the mmap path my_malloc() would
-     * have used for a fresh allocation of the same size. That's a
-     * policy inconsistency: the same requested size gets a different
-     * backing strategy depending on whether it arrived via malloc() or
-     * realloc(), and it defeats the point of ever using mmap for large
-     * blocks (independent unmap on free, no heap fragmentation).
-     *
-     * Confirmed experimentally before the fix: a 130000-byte sbrk block
-     * grown to 200000 via realloc() came back with IS_MMAP == false and
-     * payload == 200000 -- i.e. a >MMAP_THRESHOLD block silently living
-     * on the sbrk heap. The fix gates on request_size instead (matching
-     * both my_malloc()'s own >= MMAP_THRESHOLD cutoff and the
-     * try_expand() gate two branches above it in the same function). */
+    /* Regression guard for a real bug found in review: my_realloc()'s */
 
-    /* Consume the entire initial free block so nothing free is left
-     * anywhere in the heap -- otherwise try_expand() could just merge
-     * with leftover free space and this test wouldn't reach the branch
-     * under test at all. */
+    /* Consume the entire initial free block so nothing free is left */
     size_t initial_free_payload = MMAP_THRESHOLD - HEADER_SIZE - FOOTER_SIZE;
     void *filler = my_malloc(initial_free_payload);
     CHECK(filler != NULL, "filler consumes the entire initial free block");
@@ -1572,7 +1253,7 @@ static void test_realloc_large_growth_from_near_threshold_uses_mmap(void)
     /* Land a legitimate sbrk block just under MMAP_THRESHOLD. */
     void *p = my_malloc(130000);
     CHECK(p != NULL, "near-threshold allocation succeeds");
-    CHECK(!IS_MMAP(hdr_of(p)), "near-threshold allocation is sbrk-backed, as expected");
+    CHECK(!is_mmap(hdr_of(p)), "near-threshold allocation is sbrk-backed, as expected");
 
     fill_pattern(p, 130000, 0x4E);
 
@@ -1581,7 +1262,7 @@ static void test_realloc_large_growth_from_near_threshold_uses_mmap(void)
     CHECK(p2 != NULL, "realloc growing past MMAP_THRESHOLD succeeds");
 
     mblockptr *b2 = hdr_of(p2);
-    CHECK(IS_MMAP(b2),
+    CHECK(is_mmap(b2),
           "block is now mmap-backed after crossing MMAP_THRESHOLD -- "
           "matches the backing strategy a fresh my_malloc(200000) would use");
     CHECK(b2->payload >= 200000,
@@ -1594,7 +1275,7 @@ static void test_realloc_large_growth_from_near_threshold_uses_mmap(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Registry -- add new tests here, nowhere else.                       */
+/* Registry -- add new tests here, nowhere else. */
 /* ------------------------------------------------------------------ */
 
 typedef void (*test_fn)(void);
@@ -1614,7 +1295,7 @@ static const TestCase tests[] = {
     {"backward coalescing",                  test_backward_coalesce},
     {"three-way coalescing",                 test_three_way_coalesce},
     {"large allocation extends heap",        test_large_allocation_extends_heap},
-    {"exact-fit extend_heap does not split (CHUNK_SIZE..MMAP_THRESHOLD gap)",
+    {"exact-fit grow_top does not split (CHUNK_SIZE..MMAP_THRESHOLD gap)",
                                               test_extend_heap_exact_fit_no_split},
     {"many extensions stay consistent",      test_many_extensions_stay_consistent},
     {"realloc forced relocation",            test_realloc_forced_relocation},
@@ -1625,7 +1306,7 @@ static const TestCase tests[] = {
     {"try_expand insufficient merge falls back", test_try_expand_insufficient_falls_back},
     {"try_expand no-prev heap-start boundary", test_try_expand_no_prev_at_heap_start},
     {"try_expand three-way merge leaves no ghost node", test_try_expand_three_way_no_ghost_node},
-    {"rover survives adjacent free + immediate malloc", test_rover_survives_adjacent_free},
+    {"scattered free + immediate malloc stays consistent", test_scattered_free_then_realloc_stays_consistent},
     {"canary survival",                      test_canary_survival},
     {"heap shrink boundary",                 test_heap_shrink_boundary},
     {"mmap threshold transitions",           test_mmap_threshold_transitions},
@@ -1649,16 +1330,12 @@ int main(int argc, char **argv)
     }
     enable_color_if_tty();
 
-    /* Unbuffered stdout matters here: every test's child exits via
-     * _exit(), which skips flushing stdio buffers. Buffered output
-     * written just before a crash would otherwise vanish silently. */
+    /* Unbuffered stdout matters here: every test's child exits via */
     setvbuf(stdout, NULL, _IONBF, 0);
 
     heap_init();
 
-    /* Shared memory so every forked child's CHECK() results (including
-     * grandchildren, from the nested double-free test) are visible back
-     * in the parent once each child exits. */
+    /* Shared memory so every forked child's CHECK() results (including */
     counters = mmap(NULL, sizeof(SharedCounters), PROT_READ | PROT_WRITE,
                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     counters->checks_run = 0;

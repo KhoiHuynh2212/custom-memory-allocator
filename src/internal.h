@@ -111,9 +111,10 @@ size_t get_MSB_bit(size_t x);
 
 int get_bin(size_t payload);
 
+#define chunk_size(b) ((b)->payload)
+
 #ifdef DEBUG
 const malloc_state *debug_get_state(void);
-
 #endif
 
 

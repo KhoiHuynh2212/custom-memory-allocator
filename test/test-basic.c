@@ -1,26 +1,11 @@
-#include "my-malloc.h"
+#include "../include/my-malloc.h"
+#include "../src/debug.h"
 #include <stdint.h>
+#include <stdbool.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
 
-/* ---------------------------------------------------------------------
- * Tiny test framework
- *
- * Instead of hand-calling every test_* function in main() and hoping we
- * remembered them all, each test registers itself in `tests[]` below.
- * Add a test = add one line to the array. Nothing to forget.
- *
- * Each test now runs in its own forked child process. If a test segfaults
- * (a real risk when a malloc bug corrupts the heap), only that child dies —
- * the parent sees it via waitpid() and moves on to the next test instead
- * of taking the whole suite down with it.
- *
- * Because the counters below are touched from child processes, they can't
- * be ordinary static ints — each fork would get its own private copy and
- * the parent would never see the child's updates. mmap with MAP_SHARED
- * gives us a block of memory that all processes read and write in place.
- * ------------------------------------------------------------------- */
 
 typedef struct {
     int checks_run;
@@ -49,14 +34,6 @@ typedef struct {
     test_fn fn;
 } TestCase;
 
-/* ---------------------------------------------------------------------
- * Shared helpers
- *
- * Several tests do "fill a buffer with a byte pattern, then confirm it
- * stuck." Pulling that into one place means a bug in the check itself
- * only needs fixing once, and each test reads as intent, not mechanics.
- * ------------------------------------------------------------------- */
-
 static void fill_pattern(void *buf, size_t n, unsigned char pattern)
 {
     memset(buf, pattern, n);
@@ -70,10 +47,6 @@ static bool verify_pattern(const void *buf, size_t n, unsigned char pattern)
     }
     return true;
 }
-
-/* ---------------------------------------------------------------------
- * Tests
- * ------------------------------------------------------------------- */
 
 static void test_basic_alloc(void)
 {
@@ -118,13 +91,25 @@ static void test_distinct_blocks_no_overlap(void)
 
 static void test_free_list_reuse(void)
 {
+    /* A guard allocation right after p1 is required: without it, freeing
+     * p1 as the very first allocation would coalesce straight into the
+     * top chunk (next == topchunkptr) and never touch a bin at all — the
+     * test would still pass, but for the wrong reason (top-chunk recarve,
+     * not free-list/bin reuse). The guard keeps `next` non-top so free(p1)
+     * is forced through insert_small_chunk() into a real bin. */
     void *p1 = my_malloc(128);
     CHECK(p1 != NULL, "first malloc(128) succeeds");
+
+    void *guard = my_malloc(128);
+    CHECK(guard != NULL, "guard allocation succeeds");
+
     my_free(p1);
 
     void *p2 = my_malloc(128);
-    CHECK(p2 == p1, "malloc(128) after free reuses the same address");
+    CHECK(p2 == p1, "malloc(128) after free reuses the same address from its bin");
+
     my_free(p2);
+    my_free(guard);
 }
 
 static void test_calloc_zeroes(void)
@@ -209,9 +194,9 @@ static void test_alignment(void)
     void *p2 = my_malloc(3);
     void *p3 = my_malloc(17);
     CHECK(p1 && p2 && p3, "odd-sized allocations succeed");
-    CHECK(((uintptr_t)p1 % ALIGN) == 0, "malloc(1) pointer is properly aligned");
-    CHECK(((uintptr_t)p2 % ALIGN) == 0, "malloc(3) pointer is properly aligned");
-    CHECK(((uintptr_t)p3 % ALIGN) == 0, "malloc(17) pointer is properly aligned");
+    CHECK(((uintptr_t)p1 % align) == 0, "malloc(1) pointer is properly aligned");
+    CHECK(((uintptr_t)p2 % align) == 0, "malloc(3) pointer is properly aligned");
+    CHECK(((uintptr_t)p3 % align) == 0, "malloc(17) pointer is properly aligned");
 
     my_free(p1);
     my_free(p2);
@@ -309,9 +294,9 @@ static void test_stress(void)
     CHECK(1, "freeing all remaining blocks does not crash");
 }
 
-/* ---------------------------------------------------------------------
- * Registry — add new tests here, nowhere else.
- * ------------------------------------------------------------------- */
+
+ // Registry — add new tests here
+
 
 static const TestCase tests[] = {
     {"basic malloc/free",                 test_basic_alloc},
@@ -347,12 +332,11 @@ int main(void)
     int suites_crashed = 0;
 
     for (size_t i = 0; i < num_tests; i++) {
-        printf("\n== %s ==\n", tests[i].name);
-        fflush(stdout); /* flush before fork so the child doesn't inherit a stale buffer */
+        printf("\n== %s ==\nn", tests[i].name);
+        fflush(stdout); 
 
         pid_t pid = fork();
         if (pid == 0) {
-            /* child: run exactly one test, then report pass/fail via exit code */
             current_test_failed = 0;
             tests[i].fn();
             _exit(current_test_failed ? 1 : 0);
@@ -372,6 +356,7 @@ int main(void)
     }
 
     printf("\n=====================================\n");
+    printf("REPORT\n");
     printf("%d/%d checks passed across %zu test suites\n",
            counters->checks_run - counters->checks_failed, counters->checks_run, num_tests);
     printf("%d suite%s failed", suites_failed, suites_failed == 1 ? "" : "s");

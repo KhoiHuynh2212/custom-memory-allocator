@@ -2,6 +2,9 @@
 #include "my-malloc.h"
 #include <stdlib.h>
 #include <time.h>   
+#include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 void test_grow_top_topsize_stays_synced(void)
 {
@@ -216,9 +219,40 @@ void test_non_deterministic_crash(void)
     }
 }
 
+void test_free_chunk_unlink_safety_catches_corruption(void)
+{
+    heap_init();
+    const malloc_state *st = debug_get_state();
+
+    void *a = my_malloc(64);
+    void *b = my_malloc(64);
+    void *c = my_malloc(64);
+    my_free(a);
+    my_free(b);
+    my_free(c);
+    // a, b, c giờ cùng nằm trong 1 bin, liên kết fd/bk với nhau
+
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        // tiến trình con: giả lập heap overflow ghi đè fd của b
+        mblockptr *bb = (mblockptr *)b - 1;
+        bb->list.next = (list *)0xdeadbeef;
+
+        check_malloc_state((struct malloc_state *)st); // kỳ vọng abort() ở đây
+        _exit(1); // không bao giờ tới được dòng này nếu check đúng
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+    printf("test_free_chunk_unlink_safety_catches_corruption: PASS\n");
+}
+
 int main()
 {
-    test_non_deterministic_crash(); 
+    // test_non_deterministic_crash(); 
+    test_free_chunk_unlink_safety_catches_corruption();
 
     return 0;
 }

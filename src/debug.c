@@ -56,11 +56,10 @@ static void check_bins(struct malloc_state *state)
     {
         list_for_each_entry(curr, &state->bins[i], list)
         {
-            check_any_chunk(state, curr);
+            check_free_chunk(state, curr); 
 
             assert(curr->payload != 0);
             size_t *footer = (size_t *)((char *)(curr + 1) + curr->payload);
-            assert(is_free(curr));
             assert(get_bin(curr->payload) == i);
             assert(curr->payload == *footer);
             assert(curr != state->topchunkptr);
@@ -137,8 +136,11 @@ void check_malloc_state(struct malloc_state *state)
 }
 
 void check_current_use(struct malloc_state* state, mblockptr* block) {
-    (void)state;
-    (void)block;
+    check_any_chunk(state, block);
+    assert(!is_free(block));
+    if(is_mmap(block)) {
+        check_mmapped_chunk(state, block);
+    }
 }
 
 void check_malloced_chunk(struct malloc_state* state, void *ptr, size_t size)
@@ -169,4 +171,18 @@ void check_malloced_chunk(struct malloc_state* state, void *ptr, size_t size)
     }
 }
 
+void check_free_chunk(struct malloc_state* state, mblockptr* block) {
+    size_t sz = chunk_size(block);
+    check_any_chunk(state, block);
+    assert(is_free(block));
+    assert(!is_mmap(block));
+
+    if(block != state->topchunkptr) {
+        if(sz >= MINBLOCKSIZE) {
+            assert(is_aligned(sz));
+            assert(block->list.next->prev == &block->list);
+            assert(block->list.prev->next == &block->list);
+        }
+    }
+}
 #endif

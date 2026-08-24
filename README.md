@@ -1,4 +1,5 @@
-<div align="center">
+
+<div align="left">
 
 # Custom-allocator
 
@@ -17,7 +18,6 @@
 - [Debug Tooling](#debug-tooling)
 - [Project Structure](#project-structure)
 - [Acknowledgments](#acknowledgments)
-- [License](#license)
 
 ---
 
@@ -42,9 +42,9 @@
 Each block is laid out contiguously as `header → payload → footer`:
 
 ```
-                          user pointer
-                               |
-                               v
+                user pointer
+                         |
+                         v
         +------------------+--------------------------+----------+
         |      Header      |          Payload           |  Footer |
         |  size / flags /  |   usable memory returned   |  size   |
