@@ -177,8 +177,7 @@ mblockptr *split(mblockptr *block, size_t request_size)
     block->payload = request_size;
     set_allocated_chunk(block);
     set_footer(block);
-    list_unlink(&block->list);
-
+ 
     return block;
 }
 
@@ -316,6 +315,7 @@ void *my_malloc(size_t size)
             gm.topchunkptr = BLOCK_NEXT_HEADER(p, request_size); // bump request byte
             gm.topchunkptr->payload = gm.topsize;
             gm.topchunkptr->flags = 0;
+            list_init(&gm.topchunkptr->list); 
             set_free_chunk(gm.topchunkptr);
 
             curr_block = p;
@@ -364,67 +364,69 @@ void *my_calloc(size_t num, size_t size)
 
 mblockptr *try_expand(mblockptr *curr, size_t new_payload)
 {
-
     mblockptr *next = BLOCK_NEXT_HEADER(curr, curr->payload);
 
     if (next == gm.topchunkptr)
-    {
+    {   
+        if (new_payload <= curr->payload)
+             return curr;
+             
+        size_t needed = new_payload - curr->payload;   
 
-        if (new_payload >= gm.topsize)
+        if (needed >= gm.topsize)                       
         {
             if (grow_top(new_payload) == NULL)
-            {
                 return NULL;
-            }
         }
-        size_t needed = new_payload - curr->payload;
+
         curr->payload = new_payload;
         gm.topsize -= needed;
+        set_footer(curr);
 
-        set_footer(curr); // re-calculate the footer
+        mblockptr *new_top = BLOCK_NEXT_HEADER(curr, curr->payload);
+        gm.topchunkptr = new_top;
+        new_top->payload = gm.topsize;
+        new_top->flags = 0;
+        list_init(&new_top->list);
+        set_free_chunk(new_top);
 
-        mblockptr *np = BLOCK_NEXT_HEADER(curr, curr->payload);
-        gm.topchunkptr = np;
-        gm.topchunkptr->payload = gm.topsize;
-        gm.topchunkptr->flags = 0;
-        set_free_chunk(gm.topchunkptr);
         return curr;
     }
 
     int next_free = ((char *)next < gm.heap_end && is_free(next));
 
+    size_t *prev_footer = (size_t *)((char *)curr - FOOTER_SIZE);
+    int prev_in_range    = ((char *)prev_footer >= gm.heap_start);
+    mblockptr *prev       = prev_in_range ? BLOCK_PREV_HEADER(curr, *prev_footer) : NULL;
+    int prev_free         = (prev_in_range && (char *)prev >= gm.heap_start && is_free(prev));
+
+    
+    size_t best_case = curr->payload
+                      + (next_free ? REQUEST_CHUNK(next->payload) : 0)
+                      + (prev_free ? REQUEST_CHUNK(prev->payload) : 0);
+
+    if (best_case < new_payload)
+        return NULL;   
+
+    
     if (next_free)
     {
         list_unlink(&next->list);
         curr->payload += REQUEST_CHUNK(next->payload);
         set_footer(curr);
+
         if (curr->payload >= new_payload)
-            return curr;
-    }
+            return curr;  
 
-    size_t *footer = (size_t *)((char *)curr - FOOTER_SIZE);
+    list_unlink(&prev->list);
+    prev->payload += REQUEST_CHUNK(curr->payload);
+    prev->flags = 0;
+    set_footer(prev);
 
-    int prev_free = ((char *)footer >= gm.heap_start);
+    if (curr->payload > 0)
+        memmove(prev + 1, curr + 1, curr->payload);
 
-    mblockptr *prev = prev_free ? BLOCK_PREV_HEADER(curr, *footer) : NULL;
-
-    prev_free = (prev_free && (char *)prev >= gm.heap_start && is_free(prev));
-
-    if (prev_free && (curr->payload + prev->payload + HEADER_SIZE + FOOTER_SIZE >= new_payload))
-    {
-
-        list_unlink(&prev->list);
-        prev->payload += REQUEST_CHUNK(curr->payload);
-        prev->flags = 0;
-        set_footer(prev);
-
-        if (curr->payload > 0)
-            memmove(prev + 1, curr + 1, curr->payload);
-
-        return prev;
-    }
-
-    return NULL;
+    return prev;
 }
 
 void *my_realloc(void *ptr, size_t size)

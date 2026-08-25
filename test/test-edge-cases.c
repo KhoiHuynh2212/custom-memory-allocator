@@ -10,8 +10,8 @@
 #include <signal.h>
 #include <time.h>
 
-
-typedef struct {
+typedef struct
+{
     int checks_run;
     int checks_failed;
 } SharedCounters;
@@ -27,7 +27,8 @@ static const char *COL_RESET = "";
 
 static void enable_color_if_tty(void)
 {
-    if (isatty(fileno(stdout))) {
+    if (isatty(fileno(stdout)))
+    {
         COL_RED = "\033[31m";
         COL_GREEN = "\033[32m";
         COL_YELLOW = "\033[33m";
@@ -35,24 +36,29 @@ static void enable_color_if_tty(void)
     }
 }
 
-#define CHECK(cond, msg)                                                    \
-    do {                                                                    \
-        counters->checks_run++;                                            \
-        if (cond) {                                                         \
-            printf("  %s[PASS]%s %s\n", COL_GREEN, COL_RESET, msg);         \
-        } else {                                                            \
-            printf("  %s[FAIL]%s %s  (test-edge-cases.c:%d)\n",             \
-                   COL_RED, COL_RESET, msg, __LINE__);                      \
-            counters->checks_failed++;                                     \
-            current_test_failed++;                                        \
-        }                                                                   \
+#define CHECK(cond, msg)                                            \
+    do                                                              \
+    {                                                               \
+        counters->checks_run++;                                     \
+        if (cond)                                                   \
+        {                                                           \
+            printf("  %s[PASS]%s %s\n", COL_GREEN, COL_RESET, msg); \
+        }                                                           \
+        else                                                        \
+        {                                                           \
+            printf("  %s[FAIL]%s %s  (test-edge-cases.c:%d)\n",     \
+                   COL_RED, COL_RESET, msg, __LINE__);              \
+            counters->checks_failed++;                              \
+            current_test_failed++;                                  \
+        }                                                           \
     } while (0)
 
 #define SECTION(name) printf("\n%s== %s ==%s\n", COL_YELLOW, name, COL_RESET)
 
 static void vlog(const char *fmt, ...)
 {
-    if (!g_verbose) return;
+    if (!g_verbose)
+        return;
     va_list ap;
     va_start(ap, fmt);
     printf("    | ");
@@ -66,22 +72,27 @@ static int run_isolated(void (*fn)(void), int *signo)
 {
     fflush(stdout);
     pid_t pid = fork();
-    if (pid < 0) {
+    if (pid < 0)
+    {
         perror("fork");
         return 0;
     }
-    if (pid == 0) {
+    if (pid == 0)
+    {
         /* child */
         fn();
         _exit(0);
     }
     int status = 0;
     waitpid(pid, &status, 0);
-    if (WIFSIGNALED(status)) {
-        if (signo) *signo = WTERMSIG(status);
+    if (WIFSIGNALED(status))
+    {
+        if (signo)
+            *signo = WTERMSIG(status);
         return -1;
     }
-    if (signo) *signo = 0;
+    if (signo)
+        *signo = 0;
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
@@ -127,7 +138,8 @@ static int bin_holds_exactly(const malloc_state *state, mblockptr *target)
     list_for_each_entry(curr, &state->bins[idx], list)
     {
         count++;
-        if (curr == target) found = 1;
+        if (curr == target)
+            found = 1;
     }
 
     return (count == 1 && found) ? 1 : 0;
@@ -136,13 +148,16 @@ static int bin_holds_exactly(const malloc_state *state, mblockptr *target)
 /* Fill a buffer with a repeating byte pattern derived from a seed. */
 static void fill_pattern(unsigned char *buf, size_t n, unsigned char seed)
 {
-    for (size_t i = 0; i < n; i++) buf[i] = (unsigned char)(seed + i);
+    for (size_t i = 0; i < n; i++)
+        buf[i] = (unsigned char)(seed + i);
 }
 
 static int check_pattern(const unsigned char *buf, size_t n, unsigned char seed)
 {
-    for (size_t i = 0; i < n; i++) {
-        if (buf[i] != (unsigned char)(seed + i)) return 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        if (buf[i] != (unsigned char)(seed + i))
+            return 0;
     }
     return 1;
 }
@@ -202,9 +217,11 @@ static void test_alignment(void)
     size_t sizes[] = {1, 2, 3, 7, 8, 9, 15, 16, 17, 63, 100, 255, 4096};
     int all_aligned = 1;
 
-    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+    {
         void *p = my_malloc(sizes[i]);
-        if (!p || !ptr_is_aligned(p)) {
+        if (!p || !ptr_is_aligned(p))
+        {
             all_aligned = 0;
             vlog("size=%zu ptr=%p NOT aligned to %zu", sizes[i], p, (size_t)align);
         }
@@ -267,8 +284,8 @@ static void test_split_threshold(void)
     my_free(p3);
 
     size_t big_shrink = big_payload > (MINBLOCKSIZE + align)
-                             ? big_payload - MINBLOCKSIZE - align
-                             : align;
+                            ? big_payload - MINBLOCKSIZE - align
+                            : align;
     void *p4 = my_malloc(big_shrink);
     CHECK(p4 == p3, "reused the same block for the split-eligible request");
     CHECK(hdr_of(p4)->payload < big_payload,
@@ -369,8 +386,13 @@ static void test_large_allocation_extends_heap(void)
     memset(p, 0x7E, big_size);
     unsigned char *bytes = p;
     int ok = 1;
-    for (size_t i = 0; i < big_size; i += 4096) { /* spot-check across pages */
-        if (bytes[i] != 0x7E) { ok = 0; break; }
+    for (size_t i = 0; i < big_size; i += 4096)
+    { /* spot-check across pages */
+        if (bytes[i] != 0x7E)
+        {
+            ok = 0;
+            break;
+        }
     }
     CHECK(ok, "large block is fully writable across its extended range");
 
@@ -427,36 +449,58 @@ static void test_many_extensions_stay_consistent(void)
 {
     SECTION("repeated heap extension keeps the allocator consistent");
 
-    enum { N = 64 };
+    enum
+    {
+        N = 64
+    };
     void *ptrs[N];
     int all_ok = 1;
     int all_distinct = 1;
 
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++)
+    {
         ptrs[i] = my_malloc(CHUNK_SIZE / 2); /* forces several sbrk growths */
-        if (!ptrs[i]) { all_ok = 0; break; }
+        if (!ptrs[i])
+        {
+            all_ok = 0;
+            break;
+        }
         memset(ptrs[i], (i & 0xFF), CHUNK_SIZE / 2);
     }
     CHECK(all_ok, "64 half-CHUNK_SIZE allocations all succeed across multiple sbrk growths");
 
-    for (int i = 0; i < N && all_distinct; i++) {
-        for (int j = i + 1; j < N; j++) {
-            if (ptrs[i] == ptrs[j]) { all_distinct = 0; break; }
+    for (int i = 0; i < N && all_distinct; i++)
+    {
+        for (int j = i + 1; j < N; j++)
+        {
+            if (ptrs[i] == ptrs[j])
+            {
+                all_distinct = 0;
+                break;
+            }
         }
     }
     CHECK(all_distinct, "all 64 allocations are at distinct addresses");
 
     int data_ok = 1;
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++)
+    {
         unsigned char *b = ptrs[i];
-        for (size_t j = 0; j < CHUNK_SIZE / 2; j += 512) {
-            if (b[j] != (unsigned char)(i & 0xFF)) { data_ok = 0; break; }
+        for (size_t j = 0; j < CHUNK_SIZE / 2; j += 512)
+        {
+            if (b[j] != (unsigned char)(i & 0xFF))
+            {
+                data_ok = 0;
+                break;
+            }
         }
-        if (!data_ok) break;
+        if (!data_ok)
+            break;
     }
     CHECK(data_ok, "data survives intact across the extended heap region");
 
-    for (int i = 0; i < N; i++) my_free(ptrs[i]);
+    for (int i = 0; i < N; i++)
+        my_free(ptrs[i]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -516,7 +560,10 @@ static void test_try_expand_backward_only(void)
     SECTION("try_expand: backward-only merge relocates via memmove, data intact");
 
     /* SZ is deliberately bigger than HEADER_SIZE + FOOTER_SIZE, so the */
-    enum { SZ = 256 };
+    enum
+    {
+        SZ = 256
+    };
 
     void *a = my_malloc(SZ);
     void *b = my_malloc(SZ);
@@ -524,7 +571,8 @@ static void test_try_expand_backward_only(void)
     CHECK(a && b && c, "three adjacent allocations succeed");
 
     unsigned char *bytes = b;
-    for (size_t i = 0; i < SZ; i++) bytes[i] = (unsigned char)(i * 7 + 3);
+    for (size_t i = 0; i < SZ; i++)
+        bytes[i] = (unsigned char)(i * 7 + 3);
 
     my_free(a); /* a becomes free, adjacent to b's backward side */
 
@@ -533,8 +581,13 @@ static void test_try_expand_backward_only(void)
     CHECK(b2 == a, "backward-only merge relocates to the absorbed block's address");
 
     int intact = 1;
-    for (size_t i = 0; i < SZ; i++) {
-        if (((unsigned char *)b2)[i] != (unsigned char)(i * 7 + 3)) { intact = 0; break; }
+    for (size_t i = 0; i < SZ; i++)
+    {
+        if (((unsigned char *)b2)[i] != (unsigned char)(i * 7 + 3))
+        {
+            intact = 0;
+            break;
+        }
     }
     CHECK(intact, "every byte of the original payload survives the memmove, "
                   "including the region that overlapped with the old header");
@@ -619,7 +672,7 @@ static void test_try_expand_insufficient_falls_back(void)
 
     void *big = my_realloc(b, 8192);
     CHECK(big != NULL, "realloc for a size far beyond any local merge still succeeds "
-                        "(falls back to malloc+copy+free)");
+                       "(falls back to malloc+copy+free)");
     CHECK(check_pattern(big, 64, 0x33), "original bytes preserved through the fallback path");
 
     my_free(big);
@@ -639,7 +692,7 @@ static void test_try_expand_no_prev_at_heap_start(void)
 
     void *p2 = my_realloc(p, 64 + 64 + HEADER_SIZE + FOOTER_SIZE - 8);
     CHECK(p2 != NULL, "realloc succeeds even though no merge is possible "
-                       "(no block exists before heap_start, next is allocated)");
+                      "(no block exists before heap_start, next is allocated)");
     CHECK(check_pattern(p2, 64, 0x7A), "original bytes preserved regardless of path taken");
 
     my_free(p2);
@@ -654,38 +707,50 @@ static void test_canary_survival(void)
 {
     SECTION("canary bytes at payload edges survive unrelated churn");
 
-    enum { N = 16, SZ = 40 };
+    enum
+    {
+        N = 16,
+        SZ = 40
+    };
     void *ptrs[N];
 
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++)
+    {
         ptrs[i] = my_malloc(SZ);
         CHECK(ptrs[i] != NULL, "canary block allocated");
         unsigned char *b = ptrs[i];
-        b[0] = (unsigned char)(0xC0 + i); /* front canary */
+        b[0] = (unsigned char)(0xC0 + i);      /* front canary */
         b[SZ - 1] = (unsigned char)(0xD0 + i); /* back canary */
     }
 
     /* Churn: allocate/free a bunch of unrelated blocks of varying sizes */
-    for (int round = 0; round < 8; round++) {
+    for (int round = 0; round < 8; round++)
+    {
         void *tmp[8];
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 8; i++)
+        {
             tmp[i] = my_malloc((size_t)(16 + round * 8 + i * 4));
-            if (tmp[i]) memset(tmp[i], 0xFF, 16 + round * 8 + i * 4);
+            if (tmp[i])
+                memset(tmp[i], 0xFF, 16 + round * 8 + i * 4);
         }
-        for (int i = 0; i < 8; i++) my_free(tmp[i]);
+        for (int i = 0; i < 8; i++)
+            my_free(tmp[i]);
     }
 
     int intact = 1;
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++)
+    {
         unsigned char *b = ptrs[i];
-        if (b[0] != (unsigned char)(0xC0 + i) || b[SZ - 1] != (unsigned char)(0xD0 + i)) {
+        if (b[0] != (unsigned char)(0xC0 + i) || b[SZ - 1] != (unsigned char)(0xD0 + i))
+        {
             intact = 0;
             vlog("canary corrupted for block %d", i);
         }
     }
     CHECK(intact, "all front/back canaries intact after unrelated allocator churn");
 
-    for (int i = 0; i < N; i++) my_free(ptrs[i]);
+    for (int i = 0; i < N; i++)
+        my_free(ptrs[i]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -699,14 +764,19 @@ static void test_heap_shrink_boundary(void)
     /* heap_init() only runs once, in main(), before any test is forked. */
     void *heap_floor = sbrk(0);
 
-    enum { N = 3 };
+    enum
+    {
+        N = 3
+    };
     void *ptrs[N];
     int all_ok = 1;
     size_t big = MMAP_THRESHOLD - CHUNK_SIZE;
 
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++)
+    {
         ptrs[i] = my_malloc(big);
-        if (!ptrs[i]) all_ok = 0;
+        if (!ptrs[i])
+            all_ok = 0;
     }
     CHECK(all_ok, "three large (MMAP_THRESHOLD - CHUNK_SIZE) allocations succeed, "
                   "exceeding heap_init()'s initial reserve and forcing new sbrk growth");
@@ -716,7 +786,8 @@ static void test_heap_shrink_boundary(void)
           "heap actually grew past the floor (sanity check: the test is exercising growth)");
 
     /* Free everything. The last free() of a big trailing block is the */
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++)
+    {
         my_free(ptrs[i]);
     }
 
@@ -780,17 +851,26 @@ static void test_footer_payload_consistency(void)
 {
     SECTION("footer sizes match header payloads (boundary tag correctness)");
 
-    enum { N = 6 };
+    enum
+    {
+        N = 6
+    };
     static const size_t sizes[N] = {8, 40, 128, 500, 1024, 3000};
     void *ptrs[N];
 
     int footers_ok = 1;
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < N; i++)
+    {
         ptrs[i] = my_malloc(sizes[i]);
-        if (!ptrs[i]) { footers_ok = 0; continue; }
+        if (!ptrs[i])
+        {
+            footers_ok = 0;
+            continue;
+        }
         mblockptr *b = hdr_of(ptrs[i]);
         size_t footer = block_footer_value(b);
-        if (footer != b->payload) footers_ok = 0;
+        if (footer != b->payload)
+            footers_ok = 0;
         vlog("requested=%zu payload=%zu footer=%zu", sizes[i], b->payload, footer);
     }
     CHECK(footers_ok,
@@ -805,9 +885,12 @@ static void test_footer_payload_consistency(void)
           "untouched neighbor block's payload is unaffected by neighboring frees");
 
     int list_ok = 1;
-    for (int i = 0; i < N; i++) {
-        if (i == 1 || i == 3) continue;
-        if (list_is_linked(&hdr_of(ptrs[i])->list)) list_ok = 0; /* allocated => never on free list */
+    for (int i = 0; i < N; i++)
+    {
+        if (i == 1 || i == 3)
+            continue;
+        if (list_is_linked(&hdr_of(ptrs[i])->list))
+            list_ok = 0; /* allocated => never on free list */
     }
     CHECK(list_ok, "remaining allocated blocks are not linked into the free list after neighbor frees");
 
@@ -818,8 +901,10 @@ static void test_footer_payload_consistency(void)
     CHECK(fb->list.next->prev == &fb->list && fb->list.prev->next == &fb->list,
           "freed block's list node is symmetrically linked in both directions");
 
-    for (int i = 0; i < N; i++) {
-        if (i == 1 || i == 3) continue;
+    for (int i = 0; i < N; i++)
+    {
+        if (i == 1 || i == 3)
+            continue;
         my_free(ptrs[i]);
     }
 }
@@ -828,7 +913,8 @@ static void test_footer_payload_consistency(void)
 /* Fuzz-style stress test with checksummed data and mixed operations */
 /* ------------------------------------------------------------------ */
 
-typedef struct {
+typedef struct
+{
     void *ptr;
     size_t size;
     unsigned char seed;
@@ -842,37 +928,51 @@ static void test_fuzz_mixed_ops_seeded(unsigned seed)
 
     srand(seed);
 
-    enum { SLOTS = 128, OPS = 2000 };
+    enum
+    {
+        SLOTS = 128,
+        OPS = 2000
+    };
     static tracked_t slots[SLOTS];
     memset(slots, 0, sizeof(slots));
 
     int corruption_found = 0;
     int op_failures = 0;
 
-    for (int op = 0; op < OPS; op++) {
+    for (int op = 0; op < OPS; op++)
+    {
         int idx = rand() % SLOTS;
         int action = rand() % 4; /* 0=alloc,1=free,2=realloc,3=alloc */
 
-        if (slots[idx].live) {
+        if (slots[idx].live)
+        {
             /* verify before mutating/removing */
-            if (!check_pattern(slots[idx].ptr, slots[idx].size, slots[idx].seed)) {
+            if (!check_pattern(slots[idx].ptr, slots[idx].size, slots[idx].seed))
+            {
                 corruption_found = 1;
             }
         }
 
-        switch (action) {
+        switch (action)
+        {
         case 1: /* free */
-            if (slots[idx].live) {
+            if (slots[idx].live)
+            {
                 my_free(slots[idx].ptr);
                 slots[idx].live = 0;
             }
             break;
 
         case 2: /* realloc (or alloc if empty) */
-            if (slots[idx].live) {
+            if (slots[idx].live)
+            {
                 size_t newsize = (size_t)(rand() % 2000) + 1;
                 void *np = my_realloc(slots[idx].ptr, newsize);
-                if (!np) { op_failures++; break; }
+                if (!np)
+                {
+                    op_failures++;
+                    break;
+                }
                 slots[idx].ptr = np;
                 slots[idx].size = newsize;
                 slots[idx].seed = (unsigned char)rand();
@@ -880,11 +980,19 @@ static void test_fuzz_mixed_ops_seeded(unsigned seed)
                 break;
             }
             /* fallthrough to alloc if slot was empty */
-        default: { /* 0, 3, and realloc-fallthrough: fresh allocation */
-            if (slots[idx].live) my_free(slots[idx].ptr);
+            __attribute__((fallthrough));
+        default:
+        { /* 0, 3, and realloc-fallthrough: fresh allocation */
+            if (slots[idx].live)
+                my_free(slots[idx].ptr);
             size_t sz = (size_t)(rand() % 2000) + 1;
             void *p = my_malloc(sz);
-            if (!p) { op_failures++; slots[idx].live = 0; break; }
+            if (!p)
+            {
+                op_failures++;
+                slots[idx].live = 0;
+                break;
+            }
             unsigned char sd = (unsigned char)rand();
             fill_pattern(p, sz, sd);
             slots[idx] = (tracked_t){.ptr = p, .size = sz, .seed = sd, .live = 1};
@@ -894,9 +1002,12 @@ static void test_fuzz_mixed_ops_seeded(unsigned seed)
     }
 
     /* final integrity pass over everything still live */
-    for (int i = 0; i < SLOTS; i++) {
-        if (slots[i].live) {
-            if (!check_pattern(slots[i].ptr, slots[i].size, slots[i].seed)) {
+    for (int i = 0; i < SLOTS; i++)
+    {
+        if (slots[i].live)
+        {
+            if (!check_pattern(slots[i].ptr, slots[i].size, slots[i].seed))
+            {
                 corruption_found = 1;
             }
         }
@@ -907,16 +1018,20 @@ static void test_fuzz_mixed_ops_seeded(unsigned seed)
 
     /* Design invariant: allocated blocks are never linked into the free */
     int invariant_ok = 1;
-    for (int i = 0; i < SLOTS; i++) {
-        if (slots[i].live && list_is_linked(&hdr_of(slots[i].ptr)->list)) {
+    for (int i = 0; i < SLOTS; i++)
+    {
+        if (slots[i].live && list_is_linked(&hdr_of(slots[i].ptr)->list))
+        {
             invariant_ok = 0;
         }
     }
     CHECK(invariant_ok, "every live allocation is off the free list "
                         "(allocated-never-on-list invariant holds)");
 
-    for (int i = 0; i < SLOTS; i++) {
-        if (slots[i].live) my_free(slots[i].ptr);
+    for (int i = 0; i < SLOTS; i++)
+    {
+        if (slots[i].live)
+            my_free(slots[i].ptr);
     }
 }
 
@@ -940,7 +1055,8 @@ static void test_try_expand_three_way_no_ghost_node(void)
     void *c = my_malloc(48);
     void *d = my_malloc(48); /* trailing blocker bounds the region */
     void *e = my_malloc(48); /* stays free the whole time: seeds the ring walk */
-    CHECK(a && b && c && d && e, "five adjacent allocations succeed");
+    void *guard = my_malloc(align); /* blocks e from being absorbed into the top chunk when freed */
+    CHECK(a && b && c && d && e && guard, "six adjacent allocations succeed");
 
     fill_pattern(b, 48, 0x5A);
 
@@ -967,6 +1083,7 @@ static void test_try_expand_three_way_no_ghost_node(void)
 
     my_free(big);
     my_free(d); /* 'd' is adjacent to 'e' and forward-coalesces with it here -- */
+    my_free(guard);
 }
 
 /* ------------------------------------------------------------------ */
@@ -981,23 +1098,36 @@ static void test_scattered_free_then_realloc_stays_consistent(void)
 
     /* This test's original version (previous, non-bin design) targeted a */
 
-    enum { N = 12, SZ = 40, ROUNDS = 20 };
+    enum
+    {
+        N = 12,
+        SZ = 40,
+        ROUNDS = 20
+    };
     void *ptrs[N];
     unsigned char seeds[N];
     int all_ok = 1;
     int data_ok = 1;
 
-    for (int round = 0; round < ROUNDS; round++) {
-        for (int i = 0; i < N; i++) {
+    for (int round = 0; round < ROUNDS; round++)
+    {
+        for (int i = 0; i < N; i++)
+        {
             ptrs[i] = my_malloc(SZ);
-            if (!ptrs[i]) { all_ok = 0; break; }
+            if (!ptrs[i])
+            {
+                all_ok = 0;
+                break;
+            }
             seeds[i] = (unsigned char)(round * N + i);
             fill_pattern(ptrs[i], SZ, seeds[i]);
         }
-        if (!all_ok) break;
+        if (!all_ok)
+            break;
 
         /* Scatter frees so several independent (non-adjacent) free-list */
-        for (int i = 0; i < N; i += 2) {
+        for (int i = 0; i < N; i += 2)
+        {
             my_free(ptrs[i]);
             ptrs[i] = NULL;
         }
@@ -1006,7 +1136,11 @@ static void test_scattered_free_then_realloc_stays_consistent(void)
         watchdog_arm(5);
         void *fresh1 = my_malloc(SZ);
         watchdog_disarm();
-        if (!fresh1) { all_ok = 0; break; }
+        if (!fresh1)
+        {
+            all_ok = 0;
+            break;
+        }
         unsigned char fresh1_seed = (unsigned char)(0xE0 + round);
         fill_pattern(fresh1, SZ, fresh1_seed);
 
@@ -1018,23 +1152,36 @@ static void test_scattered_free_then_realloc_stays_consistent(void)
         watchdog_arm(5);
         void *fresh2 = my_malloc(SZ);
         watchdog_disarm();
-        if (!fresh2) { all_ok = 0; break; }
+        if (!fresh2)
+        {
+            all_ok = 0;
+            break;
+        }
         unsigned char fresh2_seed = (unsigned char)(0xB0 + round);
         fill_pattern(fresh2, SZ, fresh2_seed);
 
         /* Verify every surviving block's data (not just the freshly */
-        for (int i = 0; i < N; i++) {
-            if (ptrs[i] && !check_pattern(ptrs[i], SZ, seeds[i])) {
+        for (int i = 0; i < N; i++)
+        {
+            if (ptrs[i] && !check_pattern(ptrs[i], SZ, seeds[i]))
+            {
                 data_ok = 0;
             }
         }
-        if (!check_pattern(fresh1, SZ, fresh1_seed)) data_ok = 0;
-        if (!check_pattern(fresh2, SZ, fresh2_seed)) data_ok = 0;
+        if (!check_pattern(fresh1, SZ, fresh1_seed))
+            data_ok = 0;
+        if (!check_pattern(fresh2, SZ, fresh2_seed))
+            data_ok = 0;
 
         my_free(fresh1);
         my_free(fresh2);
-        for (int i = 0; i < N; i++) {
-            if (ptrs[i]) { my_free(ptrs[i]); ptrs[i] = NULL; }
+        for (int i = 0; i < N; i++)
+        {
+            if (ptrs[i])
+            {
+                my_free(ptrs[i]);
+                ptrs[i] = NULL;
+            }
         }
     }
 
@@ -1051,8 +1198,8 @@ static void test_malloc_size_overflow_guard(void)
     SECTION("size_t overflow guard around SIZE_MAX rejects unsatisfiable requests");
 
     /* my_malloc() rejects anything where `size >= SIZE_MAX - (align - 1)`, */
-    size_t just_over  = __SIZE_MAX__ - (align - 1);       /* first rejected value */
-    size_t just_under = just_over - 1;                     /* largest nominally-allowed value */
+    size_t just_over = __SIZE_MAX__ - (align - 1); /* first rejected value */
+    size_t just_under = just_over - 1;             /* largest nominally-allowed value */
 
     CHECK(my_malloc(just_over) == NULL,
           "size right at the align_up overflow boundary is rejected");
@@ -1061,7 +1208,8 @@ static void test_malloc_size_overflow_guard(void)
 
     /* just_under passes the align_up guard, but is still astronomically */
     void *p = my_malloc(just_under);
-    if (p != NULL) {
+    if (p != NULL)
+    {
         vlog("my_malloc(SIZE_MAX - align) unexpectedly succeeded -- "
              "environment has an implausible amount of virtual memory");
         my_free(p);
@@ -1081,10 +1229,13 @@ static void test_malloc_mmap_path_integer_overflow(void)
     size_t evil = __SIZE_MAX__ - align - 8; /* passes align_up's guard */
 
     void *p = my_malloc(evil);
-    if (p == NULL) {
+    if (p == NULL)
+    {
         CHECK(1, "mmap path correctly rejects a request whose header+footer "
                  "accounting would overflow size_t");
-    } else {
+    }
+    else
+    {
         mblockptr *b = hdr_of(p);
         vlog("evil malloc succeeded: payload=%zu requested=%zu", b->payload, evil);
         CHECK(b->payload >= evil,
@@ -1151,7 +1302,8 @@ static void test_double_free_after_realloc_zero(void)
 
 #include <pthread.h>
 
-typedef struct {
+typedef struct
+{
     int thread_id;
     int ops;
     int failures;
@@ -1162,18 +1314,24 @@ static void *concurrent_worker(void *arg)
     thread_arg_t *ta = arg;
     unsigned seed = (unsigned)(ta->thread_id * 7919 + 13);
 
-    enum { SLOTS = 16 };
+    enum
+    {
+        SLOTS = 16
+    };
     void *ptrs[SLOTS] = {0};
     size_t sizes[SLOTS] = {0};
     unsigned char seeds[SLOTS] = {0};
 
-    for (int op = 0; op < ta->ops; op++) {
+    for (int op = 0; op < ta->ops; op++)
+    {
         seed = seed * 1103515245 + 12345;
         int idx = (int)(seed % SLOTS);
         seed = seed * 1103515245 + 12345;
 
-        if (ptrs[idx]) {
-            if (!check_pattern(ptrs[idx], sizes[idx], seeds[idx])) {
+        if (ptrs[idx])
+        {
+            if (!check_pattern(ptrs[idx], sizes[idx], seeds[idx]))
+            {
                 ta->failures++;
             }
             my_free(ptrs[idx]);
@@ -1182,7 +1340,8 @@ static void *concurrent_worker(void *arg)
 
         size_t sz = (seed % 400) + 1;
         void *p = my_malloc(sz);
-        if (!p) {
+        if (!p)
+        {
             ta->failures++;
             continue;
         }
@@ -1193,9 +1352,12 @@ static void *concurrent_worker(void *arg)
         seeds[idx] = sd;
     }
 
-    for (int i = 0; i < SLOTS; i++) {
-        if (ptrs[i]) {
-            if (!check_pattern(ptrs[i], sizes[i], seeds[i])) ta->failures++;
+    for (int i = 0; i < SLOTS; i++)
+    {
+        if (ptrs[i])
+        {
+            if (!check_pattern(ptrs[i], sizes[i], seeds[i]))
+                ta->failures++;
             my_free(ptrs[i]);
         }
     }
@@ -1208,19 +1370,25 @@ static void test_concurrent_alloc_free(void)
     SECTION("thread safety: concurrent malloc/free under global_lock stays consistent");
 
     /* This is a basic smoke test for the mutex, not a substitute for */
-    enum { NTHREADS = 6, OPS_PER_THREAD = 500 };
+    enum
+    {
+        NTHREADS = 6,
+        OPS_PER_THREAD = 500
+    };
     pthread_t threads[NTHREADS];
     thread_arg_t args[NTHREADS];
 
     watchdog_arm(20);
-    for (int i = 0; i < NTHREADS; i++) {
+    for (int i = 0; i < NTHREADS; i++)
+    {
         args[i] = (thread_arg_t){.thread_id = i, .ops = OPS_PER_THREAD, .failures = 0};
         int rc = pthread_create(&threads[i], NULL, concurrent_worker, &args[i]);
         CHECK(rc == 0, "thread creation succeeds");
     }
 
     int total_failures = 0;
-    for (int i = 0; i < NTHREADS; i++) {
+    for (int i = 0; i < NTHREADS; i++)
+    {
         pthread_join(threads[i], NULL);
         total_failures += args[i].failures;
     }
@@ -1280,51 +1448,54 @@ static void test_realloc_large_growth_from_near_threshold_uses_mmap(void)
 
 typedef void (*test_fn)(void);
 
-typedef struct {
+typedef struct
+{
     const char *name;
     test_fn fn;
 } TestCase;
 
 static const TestCase tests[] = {
-    {"NULL handling",                        test_null_handling},
-    {"double free detection",                test_double_free},
-    {"alignment guarantees",                 test_alignment},
-    {"zero-size variants",                   test_zero_size_variants},
-    {"split threshold",                      test_split_threshold},
-    {"forward coalescing",                   test_forward_coalesce},
-    {"backward coalescing",                  test_backward_coalesce},
-    {"three-way coalescing",                 test_three_way_coalesce},
-    {"large allocation extends heap",        test_large_allocation_extends_heap},
+    {"NULL handling", test_null_handling},
+    {"double free detection", test_double_free},
+    {"alignment guarantees", test_alignment},
+    {"zero-size variants", test_zero_size_variants},
+    {"split threshold", test_split_threshold},
+    {"forward coalescing", test_forward_coalesce},
+    {"backward coalescing", test_backward_coalesce},
+    {"three-way coalescing", test_three_way_coalesce},
+    {"large allocation extends heap", test_large_allocation_extends_heap},
     {"exact-fit grow_top does not split (CHUNK_SIZE..MMAP_THRESHOLD gap)",
-                                              test_extend_heap_exact_fit_no_split},
-    {"many extensions stay consistent",      test_many_extensions_stay_consistent},
-    {"realloc forced relocation",            test_realloc_forced_relocation},
-    {"try_expand forward-only merge",        test_try_expand_forward_only},
-    {"try_expand backward-only merge",       test_try_expand_backward_only},
-    {"try_expand three-way merge",           test_try_expand_three_way},
-    {"try_expand split after merge",         test_try_expand_split_after_merge},
+     test_extend_heap_exact_fit_no_split},
+    {"many extensions stay consistent", test_many_extensions_stay_consistent},
+    {"realloc forced relocation", test_realloc_forced_relocation},
+    {"try_expand forward-only merge", test_try_expand_forward_only},
+    {"try_expand backward-only merge", test_try_expand_backward_only},
+    {"try_expand three-way merge", test_try_expand_three_way},
+    {"try_expand split after merge", test_try_expand_split_after_merge},
     {"try_expand insufficient merge falls back", test_try_expand_insufficient_falls_back},
     {"try_expand no-prev heap-start boundary", test_try_expand_no_prev_at_heap_start},
     {"try_expand three-way merge leaves no ghost node", test_try_expand_three_way_no_ghost_node},
     {"scattered free + immediate malloc stays consistent", test_scattered_free_then_realloc_stays_consistent},
-    {"canary survival",                      test_canary_survival},
-    {"heap shrink boundary",                 test_heap_shrink_boundary},
-    {"mmap threshold transitions",           test_mmap_threshold_transitions},
-    {"footer/payload consistency",           test_footer_payload_consistency},
-    {"size_t overflow guard",                test_malloc_size_overflow_guard},
-    {"mmap-path integer overflow",           test_malloc_mmap_path_integer_overflow},
-    {"realloc to same size is a no-op",      test_realloc_same_size_noop},
+    {"canary survival", test_canary_survival},
+    {"heap shrink boundary", test_heap_shrink_boundary},
+    {"mmap threshold transitions", test_mmap_threshold_transitions},
+    {"footer/payload consistency", test_footer_payload_consistency},
+    {"size_t overflow guard", test_malloc_size_overflow_guard},
+    {"mmap-path integer overflow", test_malloc_mmap_path_integer_overflow},
+    {"realloc to same size is a no-op", test_realloc_same_size_noop},
     {"realloc near-threshold growth converts to mmap",
-                                              test_realloc_large_growth_from_near_threshold_uses_mmap},
-    {"double free after realloc(ptr,0)",     test_double_free_after_realloc_zero},
-    {"concurrent alloc/free thread safety",  test_concurrent_alloc_free},
-    {"fuzz: mixed ops",                      test_fuzz_mixed_ops},
+     test_realloc_large_growth_from_near_threshold_uses_mmap},
+    {"double free after realloc(ptr,0)", test_double_free_after_realloc_zero},
+    {"concurrent alloc/free thread safety", test_concurrent_alloc_free},
+    {"fuzz: mixed ops", test_fuzz_mixed_ops},
 };
 
 int main(int argc, char **argv)
 {
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0)
+        {
             g_verbose = 1;
         }
     }
@@ -1337,7 +1508,7 @@ int main(int argc, char **argv)
 
     /* Shared memory so every forked child's CHECK() results (including */
     counters = mmap(NULL, sizeof(SharedCounters), PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     counters->checks_run = 0;
     counters->checks_failed = 0;
 
@@ -1345,11 +1516,13 @@ int main(int argc, char **argv)
     int suites_failed = 0;
     int suites_crashed = 0;
 
-    for (size_t i = 0; i < num_tests; i++) {
+    for (size_t i = 0; i < num_tests; i++)
+    {
         fflush(stdout); /* flush before fork so the child doesn't inherit a stale buffer */
 
         pid_t pid = fork();
-        if (pid == 0) {
+        if (pid == 0)
+        {
             /* child: run exactly one test, then report pass/fail via exit code */
             current_test_failed = 0;
             tests[i].fn();
@@ -1359,28 +1532,35 @@ int main(int argc, char **argv)
         int status;
         waitpid(pid, &status, 0);
 
-        if (WIFSIGNALED(status)) {
+        if (WIFSIGNALED(status))
+        {
             printf("  %s[CRASH]%s '%s' terminated by signal %d (%s)\n",
                    COL_RED, COL_RESET, tests[i].name,
                    WTERMSIG(status), strsignal(WTERMSIG(status)));
             suites_crashed++;
             suites_failed++;
-        } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        }
+        else if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+        {
             suites_failed++;
         }
     }
 
     printf("\n=====================================\n");
-    if (counters->checks_failed == 0 && suites_failed == 0) {
+    if (counters->checks_failed == 0 && suites_failed == 0)
+    {
         printf("%s%d/%d checks passed across %zu test suites%s\n",
                COL_GREEN, counters->checks_run, counters->checks_run, num_tests, COL_RESET);
-    } else {
+    }
+    else
+    {
         printf("%s%d/%d checks passed across %zu test suites%s\n",
                COL_RED, counters->checks_run - counters->checks_failed,
                counters->checks_run, num_tests, COL_RESET);
     }
     printf("%d suite%s failed", suites_failed, suites_failed == 1 ? "" : "s");
-    if (suites_crashed) {
+    if (suites_crashed)
+    {
         printf(" (%d crashed the test process)", suites_crashed);
     }
     printf("\n=====================================\n");

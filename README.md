@@ -42,14 +42,14 @@
 Each block is laid out contiguously as `header → payload → footer`:
 
 ```
-                user pointer
-                         |
-                         v
-        +------------------+--------------------------+----------+
+                     user pointer
+                           |
+                           v
+        +------------------+--------------------------+-----------+
         |      Header      |          Payload           |  Footer |
         |  size / flags /  |   usable memory returned   |  size   |
         |   free-list node |         to caller          |  copy   |
-        +------------------+--------------------------+----------+
+        +------------------+--------------------------+-----------+
 ```
 
 - **Header (`mblockptr`)** — the block's payload size, flags (free/allocated, `sbrk`/`mmap`), and the intrusive list node used to thread it into a bin.
@@ -74,7 +74,10 @@ make
 ### Run tests
 
 ```bash
-make test
+make test-basic
+make test-edge-cases
+make test_threads
+make test_bugs
 ```
 
 ## Debug Tooling
@@ -91,9 +94,9 @@ make helgrind-check
 
 ```
 custom-malloc/
-├── src/          # Allocator implementation
+├── src/           # Allocator implementation
 ├── include/       # Public headers
-├── tests/          # Unit + stress tests
+├── tests/         # Unit + stress tests
 └── Makefile
 ```
 
@@ -108,6 +111,6 @@ This project is an independent, from-scratch implementation written to understan
 
 
 
-<div align="center">
+<div align="left">
 <sub>Built by <a href="https://github.com/KhoiHuynh2212">Khoi Huynh</a></sub>
 </div>
