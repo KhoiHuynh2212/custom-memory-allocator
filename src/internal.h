@@ -106,6 +106,8 @@ static inline void set_footer(mblockptr *block)
 void insert_small_chunk(mblockptr * chunk, size_t size);
 void insert_large_chunk(mblockptr * chunk, size_t size);
 
+
+
 size_t trim_chunk(mblockptr* block);
 size_t get_MSB_bit(size_t x);
 

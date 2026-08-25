@@ -79,16 +79,19 @@ mblockptr *find_suitable_block(size_t request_size)
     int idx = get_bin(request_size);
 
     if (list_is_empty(&gm.bins[idx]))
-    {   
+    {
         bool found = false;
-        for(int i = idx; i < NUM_BINS - 1;i++) {
-            if(!list_is_empty(&gm.bins[i])) {
+        for (int i = idx; i < NUM_BINS - 1; i++)
+        {
+            if (!list_is_empty(&gm.bins[i]))
+            {
                 found = true;
                 idx = i;
                 break;
-            } 
+            }
         }
-        if(!found) {
+        if (!found)
+        {
             return NULL;
         }
     }
@@ -113,17 +116,19 @@ mblockptr *find_suitable_block(size_t request_size)
         {
             g_scan_steps++;
 
-
-            if(!ok_address(&gm,curr_block)) {
-                fprintf(stderr, "heap corruption detected: bad free-list pointer %p\n",(void *)curr_block);
+            if (!ok_address(&gm, curr_block))
+            {
+                fprintf(stderr, "heap corruption detected: bad free-list pointer %p\n", (void *)curr_block);
                 abort();
             }
-            if (curr_block->payload >= request_size) {
+            if (curr_block->payload >= request_size)
+            {
                 best = curr_block;
-            } else {
+            }
+            else
+            {
                 break;
             }
-                
         }
 
         if (best != NULL)
@@ -177,7 +182,7 @@ mblockptr *split(mblockptr *block, size_t request_size)
     block->payload = request_size;
     set_allocated_chunk(block);
     set_footer(block);
- 
+
     return block;
 }
 
@@ -299,7 +304,8 @@ void *my_malloc(size_t size)
 
             mblockptr *p = gm.topchunkptr; // start at old top
             size_t needed = request_size + align_tag;
-            if(needed > gm.topsize) {
+            if (needed > gm.topsize)
+            {
                 // grow if the top chunk is smaller than needed
                 if (grow_top(request_size) == NULL)
                 {
@@ -315,7 +321,7 @@ void *my_malloc(size_t size)
             gm.topchunkptr = BLOCK_NEXT_HEADER(p, request_size); // bump request byte
             gm.topchunkptr->payload = gm.topsize;
             gm.topchunkptr->flags = 0;
-            list_init(&gm.topchunkptr->list); 
+            list_init(&gm.topchunkptr->list);
             set_free_chunk(gm.topchunkptr);
 
             curr_block = p;
@@ -329,7 +335,7 @@ void *my_malloc(size_t size)
             }
 
             set_allocated_chunk(curr_block); // mark as allocated (clear free bit)
-            set_chunk(curr_block);      // mark as sbrk'd (clear mmap bit)
+            set_chunk(curr_block);           // mark as sbrk'd (clear mmap bit)
         }
 
         s = pthread_mutex_unlock(&global_lock);
@@ -349,7 +355,7 @@ void *my_calloc(size_t num, size_t size)
     if (num != 0 && size > __SIZE_MAX__ / num)
     {
         return NULL;
-    }       
+    }
 
     void *ptr = my_malloc(num * size);
     if (ptr == NULL)
@@ -367,13 +373,12 @@ mblockptr *try_expand(mblockptr *curr, size_t new_payload)
     mblockptr *next = BLOCK_NEXT_HEADER(curr, curr->payload);
 
     if (next == gm.topchunkptr)
-    {   
+    {
         if (new_payload <= curr->payload)
-             return curr;
-             
-        size_t needed = new_payload - curr->payload;   
+            return curr;
 
-        if (needed >= gm.topsize)                       
+        size_t needed = new_payload - curr->payload;
+        if (needed >= gm.topsize)
         {
             if (grow_top(new_payload) == NULL)
                 return NULL;
@@ -396,19 +401,17 @@ mblockptr *try_expand(mblockptr *curr, size_t new_payload)
     int next_free = ((char *)next < gm.heap_end && is_free(next));
 
     size_t *prev_footer = (size_t *)((char *)curr - FOOTER_SIZE);
-    int prev_in_range    = ((char *)prev_footer >= gm.heap_start);
-    mblockptr *prev       = prev_in_range ? BLOCK_PREV_HEADER(curr, *prev_footer) : NULL;
-    int prev_free         = (prev_in_range && (char *)prev >= gm.heap_start && is_free(prev));
+    int prev_in_range = ((char *)prev_footer >= gm.heap_start);
+    mblockptr *prev = prev_in_range ? BLOCK_PREV_HEADER(curr, *prev_footer) : NULL;
+    int prev_free = (prev_in_range && (char *)prev >= gm.heap_start && is_free(prev));
 
-    
     size_t best_case = curr->payload
                       + (next_free ? REQUEST_CHUNK(next->payload) : 0)
                       + (prev_free ? REQUEST_CHUNK(prev->payload) : 0);
 
     if (best_case < new_payload)
-        return NULL;   
+        return NULL;
 
-    
     if (next_free)
     {
         list_unlink(&next->list);
@@ -416,7 +419,8 @@ mblockptr *try_expand(mblockptr *curr, size_t new_payload)
         set_footer(curr);
 
         if (curr->payload >= new_payload)
-            return curr;  
+            return curr;
+    }
 
     list_unlink(&prev->list);
     prev->payload += REQUEST_CHUNK(curr->payload);
@@ -428,7 +432,6 @@ mblockptr *try_expand(mblockptr *curr, size_t new_payload)
 
     return prev;
 }
-
 void *my_realloc(void *ptr, size_t size)
 {
     void *new_ptr;
@@ -447,7 +450,7 @@ void *my_realloc(void *ptr, size_t size)
     mblockptr *current_block = (mblockptr *)ptr - 1;
 
     if (!is_mmap(current_block))
-    {   
+    {
         // SBRK BRANCH
         int s = pthread_mutex_lock(&global_lock);
         if (s != 0)
@@ -498,9 +501,11 @@ void *my_realloc(void *ptr, size_t size)
             nb->payload = total_page_up - HEADER_SIZE - FOOTER_SIZE;
             set_footer(nb);
             return nb + 1;
-        } else {
-           /* mremap failed: current_block (old payload) remains untouched —
-                intentionally fall through to the common malloc-copy-free path at the end instead of returning NULL */
+        }
+        else
+        {
+            /* mremap failed: current_block (old payload) remains untouched —
+                 intentionally fall through to the common malloc-copy-free path at the end instead of returning NULL */
             perror("mremap");
         }
     }
@@ -520,38 +525,43 @@ void *my_realloc(void *ptr, size_t size)
     return new_ptr;
 }
 
-size_t trim_chunk(mblockptr* block) {
+size_t trim_chunk(mblockptr *block)
+{
 
-    if(!is_free(block) || is_mmap(block)) {
+    if (!is_free(block) || is_mmap(block))
+    {
         return 0;
     }
 
-    char* payload_start = (char*) (block + 1); 
-    char* payload_end = payload_start + block->payload;
+    char *payload_start = (char *)(block + 1);
+    char *payload_end = payload_start + block->payload;
 
     size_t page = (size_t)LINUX_PAGE;
 
-    uintptr_t start = ((uintptr_t) payload_start + page - 1) & ~(page - 1); // ROUND UP
-    uintptr_t end = (uintptr_t) payload_end & ~(page - 1); // ROUND DOWN
+    uintptr_t start = ((uintptr_t)payload_start + page - 1) & ~(page - 1); // ROUND UP
+    uintptr_t end = (uintptr_t)payload_end & ~(page - 1);                  // ROUND DOWN
 
-    if(start >= end) {
+    if (start >= end)
+    {
         return 0;
-    } 
+    }
 
-    if(madvise((void*) start, end - start, MADV_DONTNEED) != 0) {
+    if (madvise((void *)start, end - start, MADV_DONTNEED) != 0)
+    {
         return 0;
     }
 
     return end - start;
-} 
+}
 
-size_t my_malloc_trim(void){
+size_t my_malloc_trim(void)
+{
 
-    const size_t ps = LINUX_PAGE; 
+    const size_t ps = LINUX_PAGE;
 
     int psindex = get_bin(ps);
 
-    // const size_t psm1 = ps - 1; 
+    // const size_t psm1 = ps - 1;
 
     size_t total_trimmed = 0;
 
@@ -559,19 +569,22 @@ size_t my_malloc_trim(void){
     if (s != 0)
         fprintf(stderr, "pthread_mutex_lock failed\n");
 
-    mblockptr* curr;
-    for(int i = 0; i < NUM_BINS; ++i) {
-        if(i >= psindex) {
-            list_for_each_entry(curr, &gm.bins[i], list) {
+    mblockptr *curr;
+    for (int i = 0; i < NUM_BINS; ++i)
+    {
+        if (i >= psindex)
+        {
+            list_for_each_entry(curr, &gm.bins[i], list)
+            {
                 total_trimmed += trim_chunk(curr);
             }
         }
-    } 
+    }
 
     s = pthread_mutex_unlock(&global_lock);
     if (s != 0)
         fprintf(stderr, "pthread_mutex_unlock failed\n");
-    return total_trimmed;    
+    return total_trimmed;
 }
 
 void insert_small_chunk(mblockptr *chunk, size_t size)
@@ -588,7 +601,8 @@ void insert_large_chunk(mblockptr *chunk, size_t size)
 
     list *head = &gm.bins[idx];
 
-    if(list_is_empty(head)) {
+    if (list_is_empty(head))
+    {
         list_add_after(head, &chunk->list);
         return;
     }
@@ -598,18 +612,23 @@ void insert_large_chunk(mblockptr *chunk, size_t size)
     while (curr->next != head)
     {
         mblockptr *next_block = list_entry(curr->next, mblockptr, list);
-        
+
         // insert before to keep sorted list
         if (next_block->payload < chunk->payload)
         {
             break;
         }
         curr = curr->next;
-    } 
+    }
 
     list_add_after(curr, &chunk->list);
+} 
 
+size_t my_malloc_footprint(void)
+{
+    return (size_t)(gm.heap_end - gm.heap_start);
 }
+
 static_assert(TOP_PAD_SIZE < TRIM_THRESHOLD, "shrink pad must be smaller than trigger threshold");
 
 void my_free(void *ptr)

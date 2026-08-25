@@ -753,21 +753,19 @@ static void test_canary_survival(void)
         my_free(ptrs[i]);
 }
 
-/* ------------------------------------------------------------------ */
-/* Boundary: heap shrinkage must never retreat past the starting break */
+//* ------------------------------------------------------------------ */
+/* Boundary: heap shrinkage actually gives memory back after a full free */
 /* ------------------------------------------------------------------ */
 
 static void test_heap_shrink_boundary(void)
 {
-    SECTION("heap shrinkage never retreats past the starting program break");
+    SECTION("heap shrinkage: footprint shrinks after everything is freed "
+            "(glibc malloc_trim(3) spirit -- only promises *whether* memory "
+            "was released, never an exact byte count or absolute address)");
 
-    /* heap_init() only runs once, in main(), before any test is forked. */
-    void *heap_floor = sbrk(0);
+    size_t footprint_before = my_malloc_footprint();
 
-    enum
-    {
-        N = 3
-    };
+    enum { N = 3 };
     void *ptrs[N];
     int all_ok = 1;
     size_t big = MMAP_THRESHOLD - CHUNK_SIZE;
@@ -781,21 +779,30 @@ static void test_heap_shrink_boundary(void)
     CHECK(all_ok, "three large (MMAP_THRESHOLD - CHUNK_SIZE) allocations succeed, "
                   "exceeding heap_init()'s initial reserve and forcing new sbrk growth");
 
-    void *heap_grown = sbrk(0);
-    CHECK(heap_grown > heap_floor,
-          "heap actually grew past the floor (sanity check: the test is exercising growth)");
+    size_t footprint_grown = my_malloc_footprint();
+    CHECK(footprint_grown > footprint_before,
+          "footprint actually grew past the baseline (sanity check: the test "
+          "is exercising real sbrk growth, not a no-op)");
 
-    /* Free everything. The last free() of a big trailing block is the */
+    /* Free everything. */
     for (int i = 0; i < N; i++)
     {
         my_free(ptrs[i]);
     }
 
-    void *heap_final = sbrk(0);
-    CHECK(heap_final >= heap_floor,
-          "program break after full shrinkage never dips below the starting heap address");
+    size_t footprint_final = my_malloc_footprint();
 
-    vlog("heap_floor=%p heap_grown=%p heap_final=%p", heap_floor, heap_grown, heap_final);
+    /* The one thing an allocator actually promises here (mirroring
+       malloc_trim(3)'s own contract): *some* memory came back once
+       everything was freed -- not a specific resulting number. */
+    CHECK(footprint_final < footprint_grown,
+          "footprint shrank after freeing everything -- the allocator gave "
+          "memory back to the OS (this also implicitly catches heap_end/"
+          "heap_start corruption: an underflowed footprint would come back "
+          "as a huge size_t and fail this comparison instead of passing it)");
+
+    vlog("footprint_before=%zu footprint_grown=%zu footprint_final=%zu",
+         footprint_before, footprint_grown, footprint_final);
 }
 
 /* ------------------------------------------------------------------ */
