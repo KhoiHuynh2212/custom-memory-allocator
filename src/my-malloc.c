@@ -81,7 +81,7 @@ mblockptr *find_suitable_block(size_t request_size)
     if (list_is_empty(&gm.bins[idx]))
     {
         bool found = false;
-        for (int i = idx; i < NUM_BINS - 1; i++)
+        for (int i = idx; i < NUM_BINS; i++)
         {
             if (!list_is_empty(&gm.bins[i]))
             {
@@ -405,15 +405,13 @@ mblockptr *try_expand(mblockptr *curr, size_t new_payload)
     mblockptr *prev = prev_in_range ? BLOCK_PREV_HEADER(curr, *prev_footer) : NULL;
     int prev_free = (prev_in_range && (char *)prev >= gm.heap_start && is_free(prev));
 
-    size_t best_case = curr->payload
-                      + (next_free ? REQUEST_CHUNK(next->payload) : 0)
-                      + (prev_free ? REQUEST_CHUNK(prev->payload) : 0);
+    size_t best_case = curr->payload + (next_free ? REQUEST_CHUNK(next->payload) : 0) + (prev_free ? REQUEST_CHUNK(prev->payload) : 0);
 
     if (best_case < new_payload)
         return NULL;
 
     if (next_free)
-    {
+    {   
         list_unlink(&next->list);
         curr->payload += REQUEST_CHUNK(next->payload);
         set_footer(curr);
@@ -478,7 +476,8 @@ void *my_realloc(void *ptr, size_t size)
 
                 pthread_mutex_unlock(&global_lock);
                 return surv + 1;
-                // try_expand may move the data to previous address, to ensure we return correct address of the data, use block + 1
+                /* try_expand may move the data to previous address,
+                    to ensure we return correct address of the data, use block + 1 */
             }
         }
         pthread_mutex_unlock(&global_lock);
@@ -504,8 +503,8 @@ void *my_realloc(void *ptr, size_t size)
         }
         else
         {
-            /* mremap failed: current_block (old payload) remains untouched —
-                 intentionally fall through to the common malloc-copy-free path at the end instead of returning NULL */
+            /* mremap failed: current_block remains untouched —
+                 intentionally fall through to the common malloc-copy-free path  */
             perror("mremap");
         }
     }
@@ -622,11 +621,22 @@ void insert_large_chunk(mblockptr *chunk, size_t size)
     }
 
     list_add_after(curr, &chunk->list);
-} 
+}
 
 size_t my_malloc_footprint(void)
 {
     return (size_t)(gm.heap_end - gm.heap_start);
+}
+
+size_t my_malloc_align(void)
+
+{
+    return (size_t)align;
+}
+size_t my_malloc_mmap_threshold(void)
+
+{
+    return (size_t)MMAP_THRESHOLD;
 }
 
 static_assert(TOP_PAD_SIZE < TRIM_THRESHOLD, "shrink pad must be smaller than trigger threshold");
@@ -640,11 +650,6 @@ void my_free(void *ptr)
     mblockptr *block = (mblockptr *)ptr - 1;
 
     int s;
-    if (is_free(block))
-    {
-        fprintf(stderr, "double free detected at %p\n", ptr);
-        abort();
-    }
 
     if (is_mmap(block))
     {
@@ -654,8 +659,16 @@ void my_free(void *ptr)
     else
     {
         s = pthread_mutex_lock(&global_lock);
+
         if (s != 0)
             fprintf(stderr, "pthread_mutex_lock failed\n");
+
+        if (is_free(block))
+        {
+            fprintf(stderr, "double free detected at %p\n", ptr);
+            abort();
+        }
+
         set_free_chunk(block);
         set_footer(block);
         list_init(&block->list);
@@ -675,11 +688,6 @@ void my_free(void *ptr)
                 insert_large_chunk(survivor, final_size);
             }
         }
-
-        /** If the top chunk is bigger than a shrink threshold,
-            we shrink and return memory for OS, but we must to make sure
-            that we don't shrink too much to even below the inital top chunk size
-        **/
 
         if (gm.topsize >= TRIM_THRESHOLD) // so shrink at double initial top size = 128 KB
         {

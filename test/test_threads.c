@@ -1,31 +1,6 @@
-// test_threads.c
-//
-// Stricter multithreaded stress/correctness test suite for my-malloc.
-//
-// Compared to a "smoke test", this suite adds:
-//   - Data-integrity checking: every allocation is filled with a
-//     pointer-derived pattern and re-verified byte-for-byte right before
-//     it is freed/reallocated, so silent heap corruption or overlapping
-//     allocations get caught instead of just "not crashing".
-//   - Alignment checking on every returned pointer (must be aligned to
-//     max_align_t, matching ALIGN in my-malloc.h).
-//   - Coverage of small sbrk-path allocations AND large mmap-path
-//     allocations (>= MMAP_THRESHOLD) from multiple threads concurrently.
-//   - realloc grow/shrink/no-op paths, including realloc(NULL, n),
-//     realloc(ptr, 0), and growth across the sbrk/mmap boundary, each
-//     verified to preserve the original bytes.
-//   - calloc zero-initialization verification and overflow rejection.
-//   - Single-threaded edge-case checks for size 0 / NULL handling before
-//     the concurrent stress phase begins.
-//   - Explicit pass/fail accounting: every check increments a global
-//     failure counter (via atomics) instead of only relying on assert(),
-//     and the process exits non-zero if any check failed.
-//
-// This intentionally does NOT test the double-free/abort() path, since
-// that is expected to call abort() and would kill the whole test binary.
-
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -35,8 +10,8 @@
 
 #define NUM_STRESS_THREADS   8
 #define ITERATIONS_PER_THREAD 5000
-#define MAX_SMALL_SIZE        2048     // stays well under MMAP_THRESHOLD
-#define LARGE_ALLOC_EVERY     97       // occasionally cross MMAP_THRESHOLD
+#define MAX_SMALL_SIZE        2048     // stays well under the mmap threshold
+#define LARGE_ALLOC_EVERY     97       // occasionally cross the mmap threshold
 #define REALLOC_THREADS       4
 #define REALLOC_ITERATIONS    2000
 
@@ -56,7 +31,7 @@ static atomic_llong g_checks_failed = 0;
 
 static bool is_aligned(const void *p)
 {
-    return ((uintptr_t)p % ALIGN) == 0;
+    return ((uintptr_t)p % my_malloc_align()) == 0;
 }
 
 // Fill `n` bytes at `p` with a pattern derived from a tag and the byte
@@ -82,13 +57,13 @@ static bool check_pattern(const unsigned char *p, size_t n, uint64_t tag)
     return true;
 }
 
-// ---------------------------------------------------------------------
 // Phase 1: single-threaded edge cases, run before any concurrency so
 // failures here are trivial to diagnose.
-// ---------------------------------------------------------------------
+
 static void run_edge_case_tests(void)
 {
     void *p;
+    size_t mmap_threshold = my_malloc_mmap_threshold();
 
     p = my_malloc(0);
     CHECK(p == NULL, "my_malloc(0) should return NULL, got %p", p);
@@ -122,14 +97,14 @@ static void run_edge_case_tests(void)
     p = my_calloc((size_t)-1, 2);
     CHECK(p == NULL, "my_calloc overflow should return NULL, got %p", p);
 
-    // request right at the MMAP_THRESHOLD boundary
-    p = my_malloc(MMAP_THRESHOLD);
-    CHECK(p != NULL, "my_malloc(MMAP_THRESHOLD) failed");
+    // request right at the mmap threshold boundary
+    p = my_malloc(mmap_threshold);
+    CHECK(p != NULL, "my_malloc(mmap_threshold) failed");
     CHECK(is_aligned(p), "mmap-path allocation misaligned: %p", p);
     if (p)
     {
-        fill_pattern(p, MMAP_THRESHOLD, 0xABCD);
-        CHECK(check_pattern(p, MMAP_THRESHOLD, 0xABCD), "pattern mismatch on large allocation");
+        fill_pattern((unsigned char *)p, mmap_threshold, 0xABCD);
+        CHECK(check_pattern((unsigned char *)p, mmap_threshold, 0xABCD), "pattern mismatch on large allocation");
         my_free(p);
     }
 
@@ -137,10 +112,8 @@ static void run_edge_case_tests(void)
            (long long)atomic_load(&g_checks_run), (long long)atomic_load(&g_checks_failed));
 }
 
-// ---------------------------------------------------------------------
 // Phase 2: concurrent malloc/free stress with pattern verification,
 // mixing small (sbrk-path) and occasional large (mmap-path) requests.
-// ---------------------------------------------------------------------
 typedef struct
 {
     int thread_id;
@@ -150,6 +123,7 @@ static void *stress_worker(void *arg_)
 {
     stress_arg *arg = (stress_arg *)arg_;
     unsigned int seed = (unsigned int)time(NULL) ^ (unsigned int)(arg->thread_id * 7919 + 1);
+    size_t mmap_threshold = my_malloc_mmap_threshold();
 
     // Keep a small rolling set of live allocations per thread to increase
     // the chance of interleaved alloc/free patterns exposing bugs.
@@ -176,7 +150,7 @@ static void *stress_worker(void *arg_)
         if (iter % LARGE_ALLOC_EVERY == 0)
         {
             // occasionally cross into mmap territory
-            size = MMAP_THRESHOLD + (rand_r(&seed) % 4096);
+            size = mmap_threshold + (rand_r(&seed) % 4096);
         }
         else
         {
@@ -220,14 +194,14 @@ static void *stress_worker(void *arg_)
     return NULL;
 }
 
-// ---------------------------------------------------------------------
 // Phase 3: concurrent realloc stress -- grow and shrink repeatedly,
 // verifying preserved bytes survive each resize.
-// ---------------------------------------------------------------------
+
 static void *realloc_worker(void *arg_)
 {
     stress_arg *arg = (stress_arg *)arg_;
     unsigned int seed = (unsigned int)time(NULL) ^ (unsigned int)(arg->thread_id * 104729 + 3);
+    size_t mmap_threshold = my_malloc_mmap_threshold();
 
     size_t size = 1 + (rand_r(&seed) % 256);
     void *p = my_malloc(size);
@@ -239,7 +213,7 @@ static void *realloc_worker(void *arg_)
 
     for (int iter = 0; iter < REALLOC_ITERATIONS; iter++)
     {
-        // Alternate between growing (sometimes past MMAP_THRESHOLD) and
+        // Alternate between growing (sometimes past the mmap threshold) and
         // shrinking, to exercise split/coalesce/expand/mmap-remap paths.
         size_t new_size;
         int choice = rand_r(&seed) % 3;
@@ -253,7 +227,7 @@ static void *realloc_worker(void *arg_)
         }
         else
         {
-            new_size = MMAP_THRESHOLD + (rand_r(&seed) % 2048);
+            new_size = mmap_threshold + (rand_r(&seed) % 2048);
         }
         if (new_size == 0) new_size = 1;
 
@@ -285,7 +259,6 @@ static void *realloc_worker(void *arg_)
 
 int main(void)
 {
-    heap_init();
 
     printf("=== Phase 1: single-threaded edge cases ===\n");
     run_edge_case_tests();

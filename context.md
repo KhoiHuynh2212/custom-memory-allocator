@@ -1,114 +1,147 @@
-# Context — Custom Allocator (dlmalloc-style) Debug Session
+# my-malloc — Session Log
 
-File này tóm tắt các bug đã tìm ra, đã sửa, và các đề xuất **chưa áp dụng** trong phiên debug hiện tại.
-Repo tham chiếu: `my-malloc.c`, `internal.h`, `list.h`, `test/test-edge-cases.c`.
+A dlmalloc-style allocator (`gm` global state, sbrk-based small/large bins keyed by `get_bin()`, mmap for large requests, a global mutex, boundary-tag headers/footers). This replaces the earlier Vietnamese-language log, which predates everything below — that one stopped right after the original `list_unlink` NULL-write crash and the first `try_expand` redesign proposal. Both of those landed; this log picks up from there.
 
----
+## 1. Original crash chain (confirmed fixed)
 
-## 1. Bug gốc (ĐÃ SỬA): NULL write trong `list_unlink`
+- **`list_unlink` NULL-write SEGV:** `split()` unconditionally called `list_unlink(&block->list)` on blocks that were never linked into any bin (live allocations, or fresh top-chunk carves). Fixed by removing that call from `split()` — every caller already owns unlinking.
+- **Follow-on "allocated-never-on-list" invariant failure:** blocks carved from a freshly created `gm.topchunkptr` never had `list_init()` called on them. Fixed by adding `list_init()` right after each new top-chunk header is created (both in `my_malloc`'s grow-top branch and `try_expand`'s top-absorb branch).
 
-**Triệu chứng:** ASan báo SEGV trong `list_unlink` (`src/list.h:265`), stack: `list_unlink -> split (my-malloc.c:180) -> my_realloc (my-malloc.c:458, nhánh shrink) -> test_fuzz_mixed_ops_seeded`.
+## 2. `try_expand()` — the missing-return bug (confirmed fixed)
 
-**Nguyên nhân:** `split()` gọi `list_unlink(&block->list)` một cách vô điều kiện ở cuối hàm, giả định `block` luôn đang nằm trong một free bin. Nhưng ở nhánh shrink của `my_realloc` (`split(current_block, request_size)`), `current_block` là block **đang được cấp phát cho user**, chưa bao giờ nằm trong bin nào — `list.next`/`list.prev` của nó vẫn là byte rác/zero chưa từng được `list_init()`. `list_unlink`'s guard (`if (list_is_linked(node))`) không phân biệt được "chưa từng init" với "đã init nhưng có neighbor thật" nếu next/prev khác `NULL`-self-loop.
+**Symptom:** ASan `READ` SEGV in `my_realloc:475`, address `0x820` (garbage, not NULL).
 
-**Fix đã áp dụng:** bỏ dòng `list_unlink(&block->list);` ra khỏi `split()`. Đã kiểm chứng: mọi caller (`my_malloc`, `my_realloc` shrink path, `try_expand`) đều đã tự chịu trách nhiệm unlink (hoặc block chưa từng được link) trước khi gọi `split()`.
+**Root cause:** a refactor nested the backward-merge logic entirely inside `if (next_free) { ... }`. When `next_free` was false, the function fell off the end without a `return` — undefined behavior, returns whatever garbage sits in the return register. `my_realloc` treated that garbage as a valid non-NULL `surv` and dereferenced `surv->payload`.
 
----
+**Fix:** moved the backward/three-way merge outside `if (next_free)` so every path returns. Current shape:
 
-## 2. Bug lộ ra sau fix #1 (ĐÃ SỬA): invariant "allocated-never-on-list" fail
-
-**Triệu chứng:** `CHECK(invariant_ok, "every live allocation is off the free list...")` fail. GDB xác nhận: `flags=0` (đúng là allocated) nhưng `list = {next=0x0, prev=0x0}` — chưa bao giờ `list_init()`.
-
-**Nguyên nhân:** Khi `my_malloc()` (nhánh carve-from-top) hoặc `try_expand()` (nhánh absorb-into-top) tạo ra một `gm.topchunkptr` **mới** bằng `BLOCK_NEXT_HEADER(...)`, header mới này không bao giờ được `list_init()`. Lần sau khi chunk đó bị carve thành block cấp phát, `list` field của nó vẫn là rác/zero → trip `list_is_linked()`.
-
-**Fix đã áp dụng:** thêm `list_init(&gm.topchunkptr->list);` ngay sau khi thiết lập `gm.topchunkptr` mới, ở cả hai chỗ: nhánh carve-from-top trong `my_malloc()` và nhánh absorb-into-top trong `try_expand()`.
-
----
-
-## 3. Design smell (CHƯA QUYẾT ĐỊNH): double-unlink trong `find_suitable_block` + `my_malloc`
-
-`find_suitable_block()` đã tự `list_unlink()` block trước khi trả về `my_malloc()`. Trước fix #1, `split()` unlink lại lần nữa — vô hại vì `list_unlink()` tự guard bằng `list_is_linked()` + tự `list_init()` lại (self-loop), nên gọi 2 lần trên node đã self-loop là no-op an toàn. Không phải bug thực sự, nhưng là "hai hàm cùng nghĩ mình chịu trách nhiệm unlink" — nên cân nhắc dọn lại nếu có thời gian. **Chưa sửa.**
-
----
-
-## 4. `try_expand()` — các vấn đề đã tìm & đề xuất tách hàm (CHƯA ÁP DỤNG)
-
-### 4a. Bug so sánh sai đại lượng (điều kiện grow_top)
-`if (new_payload >= gm.topsize)` so sai — phải so `needed` (phần thực sự còn thiếu = `new_payload - curr->payload`) với `gm.topsize`, không phải `new_payload` tuyệt đối. Hậu quả: gọi `sbrk()` (qua `grow_top()`) nhiều hơn cần thiết. Không unsafe, chỉ lãng phí. **Đề xuất fix:** tính `needed` trước, so `needed >= gm.topsize`.
-
-### 4b. Non-atomic mutation khi expand thất bại
-Nếu forward-merge chạy (unlink `next`, tăng `curr->payload`) nhưng vẫn không đủ, và backward-merge cũng thất bại, hàm trả `NULL` nhưng `curr` đã bị mutate vĩnh viễn. Đã verify: KHÔNG gây corruption (caller fallback `malloc+copy+free` vẫn hoạt động đúng vì block sau merge vẫn well-formed), chỉ lãng phí công sức merge trước khi bỏ. **Đề xuất fix:** tính `best_case` (tổng nếu gộp cả 2 phía) TRƯỚC khi đụng vào bất cứ con trỏ nào; trả `NULL` sớm nếu không đủ.
-
-### 4c. Đề xuất tách 3 case thành 3 hàm `static inline` riêng
-Lý do: mỗi case có precondition/invariant riêng (giống style doc-comment đã có sẵn trong `list.h`). Đề xuất:
-- `try_expand_into_top(curr, new_payload)` — case top-chunk, có kèm guard `if (new_payload <= curr->payload) return curr;` (tránh underflow `size_t` nếu new_payload nhỏ hơn payload hiện tại — **fix tốt do người dùng tự nghĩ ra**, chưa có trong bản gốc).
-- `try_expand_forward(curr, next, new_payload)` — merge-tới, luôn mutate `curr` khi được gọi (precondition: `next` đang free).
-- `try_expand_backward(curr, prev)` — merge-ngược/ba-chiều, luôn `memmove` (precondition: `prev` đang free và đủ lớn).
-
-⚠️ **Lưu ý quan trọng — bug regression khi áp dụng:** một bản paste nháp đã vô tình lồng nhầm code merge-ngược **vào bên trong** `if (next_free) { ... }`, khiến case merge-ngược-một-mình (`test_try_expand_backward_only`) không bao giờ chạy được nữa. Khi áp dụng bản tách hàm, PHẢI đảm bảo `try_expand_backward()` được gọi **độc lập**, không lồng trong nhánh `next_free`. Bản code mẫu đã viết đúng thứ tự này ở tin nhắn trước, dùng làm tham chiếu khi áp dụng thật.
-
-**Trạng thái: đã có bản mẫu đầy đủ 3 hàm + hàm điều phối, nhưng CHƯA ÁP DỤNG vào file thật.**
-
----
-
-## 5. Test bug: `test_try_expand_three_way_no_ghost_node` (ĐỀ XUẤT, chưa xác nhận áp dụng)
-
-**Triệu chứng:** `[FAIL] 'e' is the sole entry in its bin` (`test-edge-cases.c:1079`).
-
-**Nguyên nhân (KHÔNG PHẢI bug allocator):** `e` là block cuối cùng trong 5 block `a,b,c,d,e` được malloc liên tiếp — nên hàng xóm phía trước của nó (sau khi carve) chính là top chunk. Khi `my_free(e)`, `coalesce()` đi vào nhánh absorb-into-top (`next == gm.topchunkptr`), khiến `e` biến thành `gm.topchunkptr` MỚI thay vì được chèn vào bin nhỏ như test kỳ vọng. `bin_holds_exactly()` sau đó tính `get_bin(e->payload)` trên payload đã bị đổi thành số khổng lồ (do absorb), tra nhầm bin, luôn fail.
-
-**Đề xuất fix:** thêm một allocation "chặn" ngay sau `e`:
 ```c
-void *e = my_malloc(48);
-void *guard = my_malloc(align); /* blocks e from being absorbed into top chunk when freed */
-...
-my_free(guard); // free ở cuối hàm luôn
+mblockptr *try_expand(mblockptr *curr, size_t new_payload)
+{
+    mblockptr *next = BLOCK_NEXT_HEADER(curr, curr->payload);
+    if (next == gm.topchunkptr) {
+        if (new_payload <= curr->payload) return curr;   /* underflow guard, user's own fix */
+        /* grow top if needed, absorb, return curr */
+        ...
+        return curr;
+    }
+
+    int next_free = ...;
+    int prev_free = ...;
+    size_t best_case = curr->payload
+                      + (next_free ? REQUEST_CHUNK(next->payload) : 0)
+                      + (prev_free ? REQUEST_CHUNK(prev->payload) : 0);
+    if (best_case < new_payload) return NULL;   /* computed before touching anything */
+
+    if (next_free) {
+        list_unlink(&next->list);
+        curr->payload += REQUEST_CHUNK(next->payload);
+        set_footer(curr);
+        if (curr->payload >= new_payload) return curr;
+    }
+
+    /* backward/three-way merge — unconditionally reachable, not nested in next_free */
+    list_unlink(&prev->list);
+    prev->payload += REQUEST_CHUNK(curr->payload);
+    ...
+    return prev;
+}
 ```
-(mirror đúng pattern `guard1`/`guard2` đã dùng trong `test_split_threshold`). **Chưa áp dụng vào file test.**
 
----
+Key invariant: `best_case` is computed **before** any mutation, so a call that's going to fail (`return NULL`) never partially merges first — no rollback logic needed.
 
-## 6. Test bug: `test_heap_shrink_boundary` (ĐANG CÂN NHẮC HƯỚNG SỬA, chưa chọn)
+**Takeaway:** `-Werror=return-type` (already implied by `-Wall -Werror` in the Makefile) is the real defense against this bug class — not blanket null-pointer checks. The bug was never a null pointer; checking for null everywhere would not have caught it.
 
-**Vấn đề:** test capture `heap_floor = sbrk(0)` cục bộ TRONG hàm test (sau khi `heap_init()` đã chạy), không phải mốc break thật sự ban đầu của tiến trình. Vì `gm.topchunkptr` có thể "trôi ngược" về gần `heap_start` sau khi mọi thứ được coalesce hết (hành vi ĐÚNG của allocator), test cũ luôn có thể fail dù allocator không hề sai.
+## 3. Two more allocator-side bugs found this round (diagnosed, not yet patched)
 
-**Đã research cách các allocator thật làm** (dlmalloc, glibc):
-- dlmalloc có API công khai `malloc_footprint()` / `malloc_max_footprint()` — allocator TỰ báo cáo số byte đã xin từ OS, thay vì để code ngoài tự soi `sbrk(0)`.
-- glibc `malloc_trim(3)`: chỉ cam kết trả về 1/0 (có giải phóng hay không), KHÔNG cam kết giải phóng chính xác bao nhiêu byte — không có tài liệu nào nói nên test bằng cách so địa chỉ break tuyệt đối.
+- **`find_suitable_block()` fallback loop off-by-one:** `for (int i = idx; i < NUM_BINS - 1; i++)` never scans the last bin. A suitable block sitting only in the largest bin is invisible to the upward scan, so `my_malloc` falls through to `grow_top` unnecessarily. Fix: `i < NUM_BINS`.
+- **`my_free()`'s double-free check races outside the lock.** `is_free(block)` is read before `pthread_mutex_lock`, so two threads freeing the *same* pointer concurrently can both pass the check before either sets the free bit — silent bin corruption, not a crash at the check site. Fix: move the check-and-set inside the critical section. Note this only closes the *concurrent* window; it never affected the single-threaded case (a lock only protects against concurrent access, it can't change already-correct sequential logic — calling `my_free(p)` twice from one thread is caught identically either way).
+- (Lower priority, noted in passing) `get_bin()` casts `payload` down to `unsigned` (32-bit) before `__builtin_clzl` — only matters for payloads near/above 4 GB.
 
-**3 hướng đề xuất (chưa chọn hướng nào, chưa áp dụng):**
-1. **(Khuyến nghị)** Thêm `my_malloc_footprint()` kiểu dlmalloc, test dựa trên con số này thay vì `sbrk(0)` trực tiếp — tách test khỏi chi tiết triển khai nội bộ (`gm.topchunkptr`, `TOP_PAD_SIZE`), bền hơn nếu sau này đổi cơ chế cấp phát.
-2. Self-consistency check: so `heap_final` với đúng công thức `topchunkptr + HEADER_SIZE + TOP_PAD_SIZE` mà `my_free()` dùng.
-3. Chỉ test "có trim hay không" (`heap_final < heap_grown`), không cố định ngưỡng dưới tuyệt đối — đúng tinh thần cam kết yếu của `malloc_trim(3)`.
-4. Bỏ hẳn test.
+## 4. New public API: `my_malloc_footprint()`, `my_malloc_align()`, `my_malloc_mmap_threshold()` (applied)
 
----
+Design decisions:
+- **Not `static`** — test files need external linkage.
+- **No lock, no `#ifdef DEBUG` guard** — matches dlmalloc's own `malloc_footprint()`: self-reported, "may be stale," a documented no-lock tradeoff (grounded against `gee.cs.oswego.edu/pub/misc/malloc-2.8.4.c`). This is a real public API function, not a debug-only helper.
 
-## 7. Compiler warnings (chưa xác nhận đã fix)
+```c
+size_t my_malloc_footprint(void)      { return (size_t)(gm.heap_end - gm.heap_start); }
+size_t my_malloc_align(void)          { return (size_t)align; }
+size_t my_malloc_mmap_threshold(void) { return (size_t)MMAP_THRESHOLD; }
+```
 
-- `-Wimplicit-fallthrough` trong `test_fuzz_mixed_ops_seeded`'s switch (case 2 → default): fallthrough có chủ đích, cần thêm `[[fallthrough]];` (hoặc `__attribute__((fallthrough));`) ngay trước `default:`.
-- `'tests' defined but not used`: chỉ là hệ quả của việc tạm thời hijack `main()` để repro không cần fork — sẽ tự hết khi revert `main()` về bản gốc (fork-loop qua `tests[]`).
+The latter two exist so black-box tests never hardcode a duplicate of `ALIGN`/`MMAP_THRESHOLD` from `internal.h` — one source of truth, queried at runtime, closer to how glibc exposes tunables via `mallopt`/`mallinfo` than a copy-pasted macro.
 
----
+## 5. `test_heap_shrink_boundary` — rewritten around the glibc `malloc_trim(3)` contract (applied)
 
-## 8. Quy trình debug đã thiết lập (để tái sử dụng)
+**Original bug:** captured `heap_floor = sbrk(0)` after `heap_init()` had already grown the heap, then asserted the final break never dips below it. Full coalescing can legitimately retreat `gm.topchunkptr` back near `heap_start` — correct behavior the test's floor made impossible to satisfy. A first proposed fix (compare against `gm.heap_start`) was also rejected as vacuous.
 
-Vì test harness chính (`main()`) fork một child process cho MỖI test suite → GDB khó theo dõi trực tiếp. Cách đã dùng để repro riêng lẻ một test (đặc biệt là fuzz test có seed từ `time(NULL)`):
+**Resolution**, grounded in real allocator docs: `malloc_trim(3)` documents only a boolean contract (memory *may* be released, no exact-byte/address guarantee); dlmalloc's `malloc_footprint()` is exactly the self-reported mechanism for this. Rewrote to assert only relative shrink:
 
-1. Lấy seed thật từ output đã chạy (dòng `seed = %u -- rerun with this seed...`).
-2. **Tạm thời** thay body của `main()` trong `test-edge-cases.c`: giữ `enable_color_if_tty()`, `setvbuf(...)`, `heap_init()`, khởi tạo `counters` qua `mmap`, rồi gọi thẳng hàm test cần debug (vd `test_fuzz_mixed_ops_seeded(SEED)`), KHÔNG fork.
-3. Build lại với đúng flags cũ (ASan, `-g`), chạy `gdb ./test-edge-cases`, `b <hàm nghi ngờ>`, `run`, `c` qua các lần dừng vô hại, đọc `bt` + `p *block`/`p block->list` khi crash/dừng đúng chỗ.
-4. **Nhớ revert `main()` về bản gốc (vòng lặp fork qua `tests[]`)** trước khi coi là "đã sửa xong", chạy lại toàn bộ 31 suites để xác nhận không có regression.
+```c
+size_t footprint_before = my_malloc_footprint();
+/* allocate N large sbrk-path blocks, forcing heap growth */
+size_t footprint_grown = my_malloc_footprint();
+CHECK(footprint_grown > footprint_before, "...");
+/* free everything */
+size_t footprint_final = my_malloc_footprint();
+CHECK(footprint_final < footprint_grown, "footprint shrank -- OS got memory back");
+```
 
----
+Deliberately never compares against `footprint_before` — the allocator isn't obligated to return to its exact starting size, only to shrink from its peak.
 
-## Việc còn tồn đọng (checklist)
+## 6. `test_bugs.c` / `test_threads.c` reusability review (applied)
 
-- [ ] Sửa `if (new_payload >= gm.topsize)` → so `needed` (4a)
-- [ ] Thêm `best_case` check trước khi mutate trong `try_expand` (4b)
-- [ ] Áp dụng bản tách 3 hàm `try_expand_into_top/forward/backward` — nhớ tránh bug lồng nhầm (4c)
-- [ ] Thêm guard allocation sau `e` trong `test_try_expand_three_way_no_ghost_node` (5)
-- [ ] Chọn hướng sửa `test_heap_shrink_boundary` và áp dụng (6)
-- [ ] Thêm `[[fallthrough]];` trong `test_fuzz_mixed_ops_seeded` (7)
-- [ ] Revert `main()` về bản gốc (fork-loop), chạy lại full suite, xác nhận 135/135 + không regression mới
-- [ ] (Tuỳ chọn) Dọn double-unlink smell giữa `find_suitable_block` và `split` (3)
+- **`test_bugs.c`** called `check_malloc_state()`, which didn't exist. Implemented (§7). No changes needed to the test file itself once the function is real — including the corruption test (`bb->list.next = 0xdeadbeef` then expect `SIGABRT`), which now works because the checker validates addresses before dereferencing them.
+- **`debug.h`** had a missing semicolon after `check_current_use`'s prototype (hard compile error under `-DDEBUG`) — flagged, needs the same treatment as §7's fixes.
+- **`test_threads.c`** referenced `MMAP_THRESHOLD`/`ALIGN` directly while including only the public `my-malloc.h` — can't compile as a true black-box test. Fixed: switched to `my_malloc_mmap_threshold()`/`my_malloc_align()` throughout, added an explicit `#include <stdbool.h>` (was relying on a transitive include), removed a direct call to `heap_init()` (internal symbol the public API never promised — `my_malloc()` already lazily initializes on first use). Rewritten file delivered.
+- `check_mmapped_chunk`'s apparent signature mismatch (flagged earlier from a stale project-doc copy) turned out to be a non-issue once the user's real, current `debug.c` was reviewed directly — it already takes `(state, block)` consistently and is correct against the mmap-path allocation code in `my_malloc` (page-rounding, footer placement, alignment all check out).
+
+## 7. `check_malloc_state()` — real implementation, grounded and debugged live
+
+A reference "cleaned-up dlmalloc" `debug.c`/`debug.h` pair (uploaded separately, different structs — `malloc_chunk`, `dv`/tree bins) confirmed `check_malloc_state` is a real, standard pattern: a top-level function composing per-structure checks (bins, dv, top chunk) plus a full-heap traversal. That confirmed the *shape* of the design already in progress; adapted to this project's actual structs (`mblockptr`, single `bins[NUM_BINS]` array, no dv/tree split):
+
+```c
+static void check_bin_list_safe(struct malloc_state *state, list *head)
+{
+    /* validates ok_address(n) BEFORE dereferencing -- turns a corrupted
+       fd/bk into a clean abort() instead of a raw SIGSEGV */
+    list *n = head->next;
+    while (n != head) {
+        assert(ok_address(state, n));
+        assert(n->next->prev == n && n->prev->next == n);   /* glibc's post-2005
+             unlink() hardening: P->fd->bk == P / P->bk->fd == P */
+        n = n->next;
+    }
+}
+
+void check_malloc_state(struct malloc_state *state)
+{
+    for (int i = 0; i < NUM_BINS; i++)
+        check_bin_list_safe(state, &state->bins[i]);   /* corruption-safe pass first */
+
+    check_bins(state);                    /* per-bin: get_bin(payload)==i, footer match */
+    check_heap(state);                    /* full walk: footers, no-2-adjacent-free */
+    check_heap_bin_consistency(state);    /* inuse chunks aren't ghost-linked in a bin */
+    check_top_chunk(state);
+}
+```
+
+**Two real compile errors hit and fixed on the first attempt** (worth remembering as a class of mistake): a stray `const` on just this one function conflicting with every other check function in the file (all non-`const`, including `check_top_chunk`, which then triggered a discarded-qualifiers error) — fixed by dropping `const` to match the file's existing convention; and the first draft reimplemented its own weaker heap-walk instead of reusing `check_bins`/`check_heap`/`check_heap_bin_consistency`, which left all three flagged "defined but not used" under `-Werror` — fixed by actually calling them from `check_malloc_state` instead of duplicating their logic.
+
+**Grounding notes (verified this session, not assumed):**
+- glibc's actual unlink hardening is `P->fd->bk == P` and `P->bk->fd == P` — confirmed via [heap-exploitation.dhavalkapil.com](https://heap-exploitation.dhavalkapil.com/attacks/unlink_exploit).
+- A literal `do_check_malloc_state` name in canonical dlmalloc source (`malloc-2.8.4.c`) could **not** be confirmed by direct fetch — the composing-function *pattern* is standard and the reference file confirmed it, but that exact name in canonical dlmalloc should be treated as unverified.
+
+## 8. The double-free race, worked through in depth
+
+Filed under "go deeper" this session as a case study in TOCTOU (time-of-check-to-time-of-use) bugs: `my_free`'s `is_free(block)` check runs before the mutex is taken, so two threads freeing the same block concurrently can both observe "not yet free" and both proceed — corrupting a bin (same block linked twice) rather than crashing at the check itself, which is what makes it dangerous (fails silently, surfaces elsewhere later). Fix is collapsing check-then-act into one critical section. Confirmed: this does *not* help same-thread double-free (already caught regardless, since there's no concurrency to race against), and does *not* help the case where thread A frees a block, the memory gets reallocated to someone else, then thread B "frees" it again — no allocator can defend against that; it's a caller bug by definition.
+
+## Still open / not yet applied
+
+- [ ] `find_suitable_block`'s `NUM_BINS - 1` off-by-one (§3)
+- [ ] `my_free`'s double-free check moved inside the lock (§3, §8)
+- [ ] `get_bin()`'s 32-bit truncation before `__builtin_clzl` (§3, low priority)
+- [ ] `debug.h`'s missing semicolon after `check_current_use` (§6)
+- [ ] Full rebuild + full suite rerun after everything above lands together, to confirm no regressions
+- [ ] Consider hardening `list_unlink()` itself with the same fd/bk consistency assert `check_bin_list_safe` uses, so corruption is caught at the point of use, not only when a debug check happens to run

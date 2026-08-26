@@ -127,13 +127,17 @@ static void check_heap_bin_consistency(struct malloc_state *state)
 }
 
 
-void check_malloc_state(struct malloc_state *state)
+static void check_bin_list_safe(struct malloc_state *state, const list *head)
 {
-    check_top_chunk(state);
-    check_bins(state);
-    check_heap(state);
-    check_heap_bin_consistency(state);
+    const list *n = head->next;
+    while (n != head) {
+        assert(ok_address(state, n));
+        assert(n->next->prev == n && n->prev->next == n);
+        n = n->next;
+    }
 }
+
+
 
 void check_current_use(struct malloc_state* state, mblockptr* block) {
     check_any_chunk(state, block);
@@ -184,5 +188,17 @@ void check_free_chunk(struct malloc_state* state, mblockptr* block) {
             assert(block->list.prev->next == &block->list);
         }
     }
+}
+
+void check_malloc_state(struct malloc_state *state)
+{
+   
+    for (int i = 0; i < NUM_BINS; i++)
+        check_bin_list_safe(state, &state->bins[i]);
+
+    check_bins(state);
+    check_heap(state);
+    check_heap_bin_consistency(state);
+    check_top_chunk(state);
 }
 #endif
