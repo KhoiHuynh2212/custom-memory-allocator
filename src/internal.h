@@ -100,7 +100,9 @@ static inline void set_footer(mblockptr *block)
         (size_t *)((char *)(block + 1) + block->payload);
 
     *footer = block->payload;
+    #ifdef DEBUG
     assert(*footer == block->payload);
+    #endif
 }
 
 void insert_small_chunk(mblockptr * chunk, size_t size);

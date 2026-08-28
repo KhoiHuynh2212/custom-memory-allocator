@@ -83,10 +83,30 @@
  *     correctly flushed across process boundaries (see child_finish())
  *   - defensive error handling on every allocation (never assumes
  *     success)
+ *
+ * BLACK-BOX DISCIPLINE: this file includes ONLY "my-malloc.h" (the
+ * public API), never "internal.h". Every measurement here goes through
+ * my_malloc/my_free/my_realloc and the public my_malloc_footprint()/
+ * my_malloc_align()/my_malloc_mmap_threshold() getters, plus plain
+ * POSIX sbrk(0) snapshots (sbrk_mark/sbrk_delta_bytes below) -- never
+ * an internal symbol like heap_init(), g_sbrk_calls, or g_scan_steps.
+ * (This file previously reached across that boundary in three spots --
+ * same bug class already caught once in test_threads.c -- which meant
+ * it wouldn't compile against the public header alone. Fixed by relying
+ * on my_malloc()'s lazy self-init instead of calling heap_init()
+ * directly, and by dropping the per-generation scan-step count in the
+ * generational-thrash phase, which has no public equivalent.)
  */
 
+/* Must precede every header below -- glibc gates sbrk(), rand_r(), and
+ * cpu_set_t/CPU_ZERO/CPU_SET/sched_setaffinity behind this feature-test
+ * macro under strict -std=c11. Same reason internal.h defines it first. */
+#define _GNU_SOURCE
 #include "my-malloc.h"
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <getopt.h>
 #include <errno.h>
@@ -365,13 +385,16 @@ static void child_finish(int status)
 /*
  * run_phase - execute one benchmark phase.
  *
- * In isolated mode: forks a fresh child, which pins itself to CPU 0,
- * calls heap_init() itself (guaranteed cold, since the parent never
- * has) and then runs @fn.
+ * In isolated mode: forks a fresh child, which pins itself to CPU 0
+ * and then runs @fn. It does NOT call heap_init() itself -- there's no
+ * public declaration for that internal symbol, and there doesn't need
+ * to be one: my_malloc()'s first call in @fn lazily initializes the
+ * heap, and since this is a freshly forked child, that first call is
+ * still guaranteed cold (empty free lists, un-grown program break).
  *
  * In shared mode: just calls @fn directly in the current process, whose
- * heap was already initialized once (and which was already pinned) at
- * the top of main().
+ * heap was already lazily initialized by the first my_malloc() call in
+ * an earlier phase (and which was already pinned) at the top of main().
  */
 static void run_phase(config_t *cfg, void (*fn)(phase_ctx_t *), phase_ctx_t *ctx)
 {
@@ -392,7 +415,6 @@ static void run_phase(config_t *cfg, void (*fn)(phase_ctx_t *), phase_ctx_t *ctx
     }
     if (pid == 0) {
         pin_to_cpu0();
-        heap_init();
         fn(ctx);
         child_finish(0);
     }
@@ -811,6 +833,14 @@ static void phase_realloc_growth(phase_ctx_t *ctx)
  * from somewhere inside the allocator's search, not from this
  * benchmark doing more work. A flat trend means the rover holds up
  * fine under this pattern; a climbing one means it doesn't.
+ *
+ * Per-generation heap growth is tracked the same black-box way as
+ * every other phase in this file -- a plain sbrk(0) snapshot before
+ * and after (sbrk_mark/sbrk_delta_bytes), not the internal
+ * g_sbrk_calls counter. There's no public equivalent for the internal
+ * g_scan_steps counter (the rover's per-call walk length), so that
+ * signal is simply not available from outside my-malloc.c and isn't
+ * reported here; the timing trend above is what stands in for it.
  */
 
 typedef struct {
@@ -865,23 +895,21 @@ static void phase_generational_thrash(phase_ctx_t *ctx)
      * is timed as its own interval and kept as a separate sample in the
      * series (see gen_avg_ns[]) instead of being folded into one mean. */
     for (int g = 0; g < GENERATIONS; g++) {
-        long sbrk_before = g_sbrk_calls; 
-        long scan_before = g_scan_steps; 
+        void *gen_before = sbrk_mark(); /* public sbrk(0) snapshot -- no internal symbols needed */
         double t0 = now_sec();
         for (long i = 0; i < ops_per_gen; i++) {
             op_generational_thrash(&tctx, i);
         }
         double elapsed = now_sec() - t0;
         gen_avg_ns[g] = (elapsed / (double)ops_per_gen) * 1e9;
-        long sbrk_calls_this_gen = g_sbrk_calls - sbrk_before; 
-        long scan_steps_this_gen = g_scan_steps - scan_before;  
+        long grown_this_gen = sbrk_delta_bytes(gen_before);
         /* One CSV comment-row per generation -- not part of the main
          * timing schema (see the fragmentation phase for the same
          * convention), but exactly the series you'd pull into a
          * spreadsheet to plot the degradation curve over time. */
         if (g_csv) {
-        fprintf(g_csv, "# generational_thrash gen=%d avg_ns=%.2f survivors_alive=%ld sbrk_calls=%ld scan_steps=%ld\n",
-                g, gen_avg_ns[g], tctx.survivor_count, sbrk_calls_this_gen, scan_steps_this_gen);
+            fprintf(g_csv, "# generational_thrash gen=%d avg_ns=%.2f survivors_alive=%ld heap_grown_bytes=%ld\n",
+                    g, gen_avg_ns[g], tctx.survivor_count, grown_this_gen);
         }
     }
 
@@ -1073,18 +1101,21 @@ int main(int argc, char **argv)
            clk.overhead_ns, clk.res_ns);
     printf("                  (see [batch=.. samples=..] on each row -- batching keeps\n");
     printf("                  the timer's own cost negligible relative to what's measured)\n");
-    printf("  ALIGN=%zu  HEADER_SIZE=%zu  FOOTER_SIZE=%zu  MIN_FREE_BLOCK=%zu  CHUNK_SIZE=%d\n",
-           (size_t)ALIGN, (size_t)HEADER_SIZE, (size_t)FOOTER_SIZE, (size_t)MINBLOCKSIZE, CHUNK_SIZE);
+    printf("  align=%zu  mmap_threshold=%zu  (from the public my_malloc_align()/"
+           "my_malloc_mmap_threshold() API)\n",
+           my_malloc_align(), my_malloc_mmap_threshold());
 
     double *scratch = malloc(sizeof(double) * (size_t)cfg.ops);
     if (!scratch) { fprintf(stderr, "benchmark: could not allocate scratch buffer\n"); return 1; }
 
     if (!cfg.isolate) {
-        /* Shared mode: the one process that runs every phase owns the
-         * one and only heap_init() call, exactly like the old behavior.
-         * Pin it once here since there's no per-phase fork to pin inside. */
+        /* Shared mode: the one process that runs every phase shares the
+         * one and only heap, exactly like the old behavior. There's no
+         * explicit heap_init() call here -- the first my_malloc() in
+         * phase_fixed_churn (the first phase in the registry) lazily
+         * initializes it, same as an isolated child would. Pin once
+         * here since there's no per-phase fork to pin inside. */
         pin_to_cpu0();
-        heap_init();
     }
 
     phase_ctx_t ctx = {.cfg = &cfg, .scratch = scratch, .clock = clk};
