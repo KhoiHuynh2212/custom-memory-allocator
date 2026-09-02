@@ -21,23 +21,23 @@
 #define free_bit (1 << 0)                                // bit 0: 1 = free, 0 = allocated
 #define mmap_bit (1 << 1)                                // bit 1: 1 = mmapped, 0 = sbrk'd
 
-#define set_free_chunk(b) ((b)->flags |= free_bit)       // set the block is free
-#define set_allocated_chunk(b) ((b)->flags &= ~free_bit) // set the block is allocated
+#define set_free_chunk(b) ((b)->size |= free_bit)       // set the block is free
+#define set_allocated_chunk(b) ((b)->size &= ~free_bit) // set the block is allocated
 
-#define is_free(b) ((b)->flags & free_bit) // check the block is free
-#define is_mmap(b) ((b)->flags & mmap_bit) // check the block is from mmap
+#define is_free(b) ((b)->size & free_bit) // check the block is free
+#define is_mmap(b) ((b)->size & mmap_bit) // check the block is from mmap
 
-#define set_mmap_chunk(b) ((b)->flags |= mmap_bit)  // set the block is from mmap
-#define set_chunk(b) ((b)->flags &= ~mmap_bit) // set the block is from heap
+#define set_mmap_chunk(b) ((b)->size |= mmap_bit)  // set the block is from mmap
+#define set_chunk(b) ((b)->size &= ~mmap_bit) // set the block is from heap
 
 extern long g_sbrk_calls;
 extern long g_scan_steps;
 
 typedef struct Block_Header
 {
-    size_t payload;
-    unsigned int flags;
-    list list;
+    size_t size;
+    size_t prev_sz; 
+    list list; // 2 pointers of the block
 } mblockptr; // block header structure 
 
 
@@ -97,9 +97,9 @@ mblockptr *try_expand(mblockptr *curr, size_t new_payload);
 static inline void set_footer(mblockptr *block)
 {        
     size_t *footer =
-        (size_t *)((char *)(block + 1) + block->payload);
+        (size_t *)((char *)(block + 1) + block->size);
 
-    *footer = block->payload;
+    *footer = block->size;
     #ifdef DEBUG
     assert(*footer == block->payload);
     #endif
@@ -107,7 +107,6 @@ static inline void set_footer(mblockptr *block)
 
 void insert_small_chunk(mblockptr * chunk, size_t size);
 void insert_large_chunk(mblockptr * chunk, size_t size);
-
 
 
 size_t trim_chunk(mblockptr* block);

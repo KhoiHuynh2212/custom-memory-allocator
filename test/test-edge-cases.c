@@ -130,7 +130,7 @@ static void watchdog_disarm(void)
 /* bin_holds_exactly - true if target is the sole entry in its own bin */
 static int bin_holds_exactly(const malloc_state *state, mblockptr *target)
 {
-    int idx = get_bin(target->payload);
+    int idx = get_bin(target->size);
     int count = 0;
     int found = 0;
     mblockptr *curr;
@@ -262,25 +262,25 @@ static void test_split_threshold(void)
     void *p1 = my_malloc(256);
     void *guard1 = my_malloc(align); /* blocks forward coalescing of p1 */
     CHECK(p1 != NULL && guard1 != NULL, "my_malloc(256) + guard succeed");
-    size_t original_payload = hdr_of(p1)->payload;
+    size_t original_payload = hdr_of(p1)->size;
     my_free(p1);
 
     /* Request just small enough that leftover < MIN_FREE_BLOCK. */
     size_t tiny_shrink = original_payload - align;
     void *p2 = my_malloc(tiny_shrink);
     CHECK(p2 == p1, "reused the same block for a slightly smaller request");
-    CHECK(hdr_of(p2)->payload == original_payload,
+    CHECK(hdr_of(p2)->size == original_payload,
           "block was NOT split when the remainder would be < MIN_FREE_BLOCK "
           "(payload left oversized on purpose)");
     vlog("original_payload=%zu tiny_shrink=%zu actual_payload=%zu MIN_FREE_BLOCK=%zu",
-         original_payload, tiny_shrink, hdr_of(p2)->payload, (size_t)MINBLOCKSIZE);
+         original_payload, tiny_shrink, hdr_of(p2)->size, (size_t)MINBLOCKSIZE);
     my_free(p2);
     my_free(guard1);
 
     /* Now request small enough that a split SHOULD happen -- same guard */
     void *p3 = my_malloc(256);
     void *guard2 = my_malloc(align);
-    size_t big_payload = hdr_of(p3)->payload;
+    size_t big_payload = hdr_of(p3)->size;
     my_free(p3);
 
     size_t big_shrink = big_payload > (MINBLOCKSIZE + align)
@@ -288,10 +288,10 @@ static void test_split_threshold(void)
                             : align;
     void *p4 = my_malloc(big_shrink);
     CHECK(p4 == p3, "reused the same block for the split-eligible request");
-    CHECK(hdr_of(p4)->payload < big_payload,
+    CHECK(hdr_of(p4)->size < big_payload,
           "block WAS split when the remainder is >= MIN_FREE_BLOCK");
     vlog("big_payload=%zu big_shrink=%zu actual_payload=%zu",
-         big_payload, big_shrink, hdr_of(p4)->payload);
+         big_payload, big_shrink, hdr_of(p4)->size);
     my_free(p4);
     my_free(guard2);
 }
@@ -417,7 +417,7 @@ static void test_extend_heap_exact_fit_no_split(void)
     CHECK(p != NULL, "exact-fit allocation in the gap succeeds");
 
     mblockptr *b = hdr_of(p);
-    CHECK(b->payload == align_up(request),
+    CHECK(b->size == align_up(request),
           "payload matches the aligned request exactly -- no split occurred, "
           "confirming this is the exact-fit branch and not a lucky reuse "
           "of a larger free block");
@@ -425,8 +425,8 @@ static void test_extend_heap_exact_fit_no_split(void)
           "the exact-fit block is allocated, not sitting on the free list");
     CHECK(!is_mmap(b), "still served from the sbrk heap, not mmap (below MMAP_THRESHOLD)");
 
-    size_t *footer = (size_t *)((char *)(b + 1) + b->payload);
-    CHECK(*footer == b->payload, "footer is consistent with the exact-fit payload");
+    size_t *footer = (size_t *)((char *)(b + 1) + b->size);
+    CHECK(*footer == b->size, "footer is consistent with the exact-fit payload");
 
     fill_pattern(p, request, 0x9C);
     CHECK(check_pattern(p, request, 0x9C), "the full exact-fit payload is writable");
@@ -438,7 +438,7 @@ static void test_extend_heap_exact_fit_no_split(void)
     void *q = my_malloc(CHUNK_SIZE + 500);
     CHECK(q != NULL, "second exact-fit allocation in the gap also succeeds");
     mblockptr *bq = hdr_of(q);
-    CHECK(bq->payload == align_up((size_t)(CHUNK_SIZE + 500)),
+    CHECK(bq->size == align_up((size_t)(CHUNK_SIZE + 500)),
           "second exact-fit block also lands with no split");
 
     my_free(q);
@@ -596,8 +596,8 @@ static void test_try_expand_backward_only(void)
           "absorbed-and-grown block is allocated -- not on the free list");
     CHECK(!is_free(hdr_of(b2)), "merged block's free bit is cleared");
 
-    size_t *footer = (size_t *)((char *)(hdr_of(b2) + 1) + hdr_of(b2)->payload);
-    CHECK(*footer == hdr_of(b2)->payload,
+    size_t *footer = (size_t *)((char *)(hdr_of(b2) + 1) + hdr_of(b2)->size);
+    CHECK(*footer == hdr_of(b2)->size,
           "footer matches payload after backward merge (metadata self-consistent)");
 
     my_free(b2);
@@ -645,7 +645,7 @@ static void test_try_expand_split_after_merge(void)
     void *b2 = my_realloc(b, 64 + align);
     CHECK(b2 == b, "small growth still expands in place via forward merge");
     CHECK(check_pattern(b2, 64, 0x99), "original bytes preserved");
-    CHECK(hdr_of(b2)->payload < 64 + 64 + HEADER_SIZE + FOOTER_SIZE,
+    CHECK(hdr_of(b2)->size < 64 + 64 + HEADER_SIZE + FOOTER_SIZE,
           "leftover space was split off, not left folded into b2's payload");
 
     void *reuse = my_malloc(align);
@@ -851,7 +851,7 @@ static void test_mmap_threshold_transitions(void)
 /* Reads the boundary-tag footer that sits right after a block's payload */
 static size_t block_footer_value(mblockptr *b)
 {
-    return *(size_t *)((char *)(b + 1) + b->payload);
+    return *(size_t *)((char *)(b + 1) + b->size);
 }
 
 static void test_footer_payload_consistency(void)
@@ -876,9 +876,9 @@ static void test_footer_payload_consistency(void)
         }
         mblockptr *b = hdr_of(ptrs[i]);
         size_t footer = block_footer_value(b);
-        if (footer != b->payload)
+        if (footer != b->size)
             footers_ok = 0;
-        vlog("requested=%zu payload=%zu footer=%zu", sizes[i], b->payload, footer);
+        vlog("requested=%zu payload=%zu footer=%zu", sizes[i], b->size, footer);
     }
     CHECK(footers_ok,
           "footer size_t immediately after each payload equals that block's header->payload");
@@ -888,7 +888,7 @@ static void test_footer_payload_consistency(void)
     my_free(ptrs[3]);
 
     mblockptr *survivor = hdr_of(ptrs[2]);
-    CHECK(survivor->payload == sizes[2],
+    CHECK(survivor->size == sizes[2],
           "untouched neighbor block's payload is unaffected by neighboring frees");
 
     int list_ok = 1;
@@ -1244,8 +1244,8 @@ static void test_malloc_mmap_path_integer_overflow(void)
     else
     {
         mblockptr *b = hdr_of(p);
-        vlog("evil malloc succeeded: payload=%zu requested=%zu", b->payload, evil);
-        CHECK(b->payload >= evil,
+        vlog("evil malloc succeeded: payload=%zu requested=%zu", b->size, evil);
+        CHECK(b->size >= evil,
               "if my_malloc() reports success, the buffer must be at least as "
               "large as requested -- a smaller payload means the size_t "
               "addition wrapped and mmap'd an undersized buffer instead of "
@@ -1266,12 +1266,12 @@ static void test_realloc_same_size_noop(void)
     CHECK(p != NULL, "malloc(200) succeeds");
     fill_pattern(p, 200, 0x61);
 
-    size_t original_payload = hdr_of(p)->payload;
+    size_t original_payload = hdr_of(p)->size;
 
     /* Request exactly the block's current usable payload -- this must */
     void *p2 = my_realloc(p, original_payload);
     CHECK(p2 == p, "realloc to the exact current payload returns the same pointer");
-    CHECK(hdr_of(p2)->payload == original_payload,
+    CHECK(hdr_of(p2)->size == original_payload,
           "payload is unchanged when the request already fits exactly");
     CHECK(check_pattern(p2, 200, 0x61), "data untouched by the no-op realloc");
 
@@ -1440,7 +1440,7 @@ static void test_realloc_large_growth_from_near_threshold_uses_mmap(void)
     CHECK(is_mmap(b2),
           "block is now mmap-backed after crossing MMAP_THRESHOLD -- "
           "matches the backing strategy a fresh my_malloc(200000) would use");
-    CHECK(b2->payload >= 200000,
+    CHECK(b2->size >= 200000,
           "mmap'd block is at least as large as requested");
     CHECK(check_pattern(p2, 130000, 0x4E),
           "original data survives the sbrk-to-mmap handoff");

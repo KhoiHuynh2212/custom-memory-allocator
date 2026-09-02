@@ -64,7 +64,7 @@ void test_shrink_lands_on_pad_size(void)
     my_free(guard);
 
     assert(st->topsize == (size_t)TOP_PAD_SIZE);
-    assert(st->topchunkptr->payload == (size_t)TOP_PAD_SIZE);
+    assert(st->topchunkptr->size == (size_t)TOP_PAD_SIZE);
     assert((char *)(st->topchunkptr + 1) + st->topsize == st->heap_end);
 
     printf("test_no_shrink_below_threshold: PASS (topsize=%zu, still below %ld)\n",
@@ -124,12 +124,12 @@ void test_descending_order_bin(void)
     do
     {
         mblockptr *curr_block = list_entry(curr, mblockptr, list);
-        size_t curr_size = curr_block->payload;
+        size_t curr_size = curr_block->size;
         list *next = curr->next;
         if (next != head)
         {
             mblockptr *next_block = list_entry(next, mblockptr, list);
-            size_t next_size = next_block->payload;
+            size_t next_size = next_block->size;
             assert(curr_size >= next_size);
         }
         curr = next;
