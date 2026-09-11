@@ -1,6 +1,6 @@
 #include "../include/my-malloc.h"
 #include "internal.h"
-#include "malloc_chunk.h"
+ // #include "malloc_chunk.h"
 
 static malloc_state gm; // allocator state
 
@@ -49,7 +49,7 @@ void heap_init()
 
     gm.topchunkptr->size = raw_payload & ~(align - 1);
     gm.topsize = gm.topchunkptr->size; // update the top size;
-    gm.topchunkptr->flags = 0;
+    gm.topchunkptr->size = 0;
     set_free_chunk(gm.topchunkptr);
 
     list_init(&gm.topchunkptr->list);
@@ -170,7 +170,7 @@ mblockptr *split(mblockptr *block, size_t request_size)
 {
     mblockptr *remainder = BLOCK_NEXT_HEADER(block, request_size);
     remainder->size = block->size - REQUEST_CHUNK(request_size);
-    remainder->flags = 0;
+    remainder->size = 0;
     set_free_chunk(remainder);
     set_footer(remainder);
     list_init(&remainder->list);
@@ -270,7 +270,7 @@ void *my_malloc(size_t size)
         }
 
         curr_block = (mblockptr *)ptr;
-        curr_block->flags = 0;
+        curr_block->size = 0;
         set_allocated_chunk(curr_block);
         set_mmap_chunk(curr_block);
         curr_block->size = total_page_up - HEADER_SIZE - FOOTER_SIZE;
@@ -321,7 +321,7 @@ void *my_malloc(size_t size)
             gm.topsize -= needed;
             gm.topchunkptr = BLOCK_NEXT_HEADER(p, request_size); // bump request byte
             gm.topchunkptr->size = gm.topsize;
-            gm.topchunkptr->flags = 0;
+            gm.topchunkptr->size = 0;
             list_init(&gm.topchunkptr->list);
             set_free_chunk(gm.topchunkptr);
 
@@ -392,7 +392,7 @@ mblockptr *try_expand(mblockptr *curr, size_t new_payload)
         mblockptr *new_top = BLOCK_NEXT_HEADER(curr, curr->size);
         gm.topchunkptr = new_top;
         new_top->size = gm.topsize;
-        new_top->flags = 0;
+        new_top->size = 0;
         list_init(&new_top->list);
         set_free_chunk(new_top);
 
@@ -423,7 +423,7 @@ mblockptr *try_expand(mblockptr *curr, size_t new_payload)
 
     list_unlink(&prev->list);
     prev->size += REQUEST_CHUNK(curr->size);
-    prev->flags = 0;
+    prev->size = 0;
     set_footer(prev);
 
     if (curr->size > 0)

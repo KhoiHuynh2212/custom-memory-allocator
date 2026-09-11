@@ -12,11 +12,16 @@
 #include "list.h"
 #include "../include/my-malloc.h"
 
-
+typedef struct malloc_chunk
+{   
+    size_t prev_sz; 
+    size_t size;
+    list list;      // double links 
+} mblockptr; // block header structure 
 
 #define align _Alignof(max_align_t) // return system align
 #define align_up(n) (((n) + align - 1) & ~(align - 1))
-#define is_aligned(n) (((size_t)(n) & (align - 1)) == 0)
+#define is_align(n) (((size_t)(n) & (align - 1)) == 0)
 #define MINBLOCKSIZE (HEADER_SIZE + FOOTER_SIZE + align) // minimum size to split
 #define free_bit (1 << 0)                                // bit 0: 1 = free, 0 = allocated
 #define mmap_bit (1 << 1)                                // bit 1: 1 = mmapped, 0 = sbrk'd

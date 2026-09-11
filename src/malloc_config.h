@@ -4,7 +4,7 @@
 #include <sys/types.h>
 
 #ifndef MALLOC_ALIGNMENT
-#define MALLOC_ALIGNMENT ((size_t) (2 * sizeof(void *)))
+#define MALLOC_ALIGNMENT ((size_t) (2 * sizeof(void *))) // reserve for 2 pointers - can work on 32 bit or 64 bit machine
 #endif  /* MALLOC_ALIGNMENT */
 
 
