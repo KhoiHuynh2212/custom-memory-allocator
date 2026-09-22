@@ -60,7 +60,7 @@ static inline int is_use(void *chunk)
     return (((struct any_chunk *)chunk)->head & INUSE_BITS) != PREV_INUSE_BIT;
 }
 
-static inline int is_mapped(void *chunk)
+static inline int is_mmapped(void *chunk)
 {
     return (((struct any_chunk *)chunk)->head & INUSE_BITS) == 0;
 }
@@ -84,7 +84,7 @@ static inline void set_free_with_prev_inuse(void *chunk, size_t size, void *n)
 
 typedef struct malloc_chunk
 {
-    size_t prev_foot; /* only valid if the previous physical chunk are freed* /
+    size_t prev_foot; /* only valid if the previous physical chunk are freed*/
     size_t head;      /* hold bits if the chunk is free or allocated */
     list list;        /* double links - use only if free */
 } mblockptr;
@@ -93,7 +93,18 @@ typedef unsigned int bin_index_t;
 typedef unsigned int bin_map_t;
 typedef unsigned int flag_t;
 
-#define MALLOC_CHUNK_SIZE (sizeof(struct malloc_chunk));
+#define MALLOC_CHUNK_SIZE (sizeof(struct malloc_chunk))
+
+#if FOOTERS
+#define CHUNK_OVERHEAD      (sizeof(size_t) * 2)
+#else /* FOOTERS */
+#define CHUNK_OVERHEAD      (sizeof(size_t))
+#endif /* FOOTERS */
+
+/* MMapped chunks need a second word of overhead ... */
+#define MMAP_CHUNK_OVERHEAD (sizeof(size_t) * 2)
+/* ... and additional padding for fake next-chunk at foot */
+#define MMAP_FOOT_PAD       (sizeof(size_t) * 4)
 
 /* The smallest size we can malloc is an aligned minimal chunk */
 #define MIN_CHUNK_SIZE ((MALLOC_CHUNK_SIZE + CHUNK_ALIGN_MASK) & ~CHUNK_ALIGN_MASK)
@@ -103,8 +114,86 @@ static inline void* chunk_to_mem(void* p) {
 }
 
 static inline struct malloc_chunk* mem_to_chunk(void* p) {
-    return (struct malloc_chunk *) ((char*) p - sizeof(size_t) * 2); /* go back to the pointer of the chunk */
+    return (struct malloc_chunk *) ((char*) p - sizeof(size_t) * 2); /* go back to the pointer of the chunk */ 
+} 
+
+static inline struct malloc_chunk* align_as_chunk(void* p) {
+    return (struct malloc_chunk *) (p + align_offset(chunk_to_mem(p)));
 }
+
+/* Bounds on request (not chunk) sizes. */
+#define MAX_REQUEST         ((-MIN_CHUNK_SIZE) << 2)
+#define MIN_REQUEST         (MIN_CHUNK_SIZE - CHUNK_OVERHEAD - (size_t) 1) 
+
+/* pad request bytes into a usable size */
+static inline size_t pad_request(size_t req) {
+    return (req + CHUNK_OVERHEAD + CHUNK_ALIGN_MASK) & ~CHUNK_ALIGN_MASK;
+}
+
+/* pad request, checking for minimum (but not maximum) */
+static inline size_t request_to_size(size_t req) {
+    return req < MIN_REQUEST ? MIN_CHUNK_SIZE : pad_request(req);
+}
+
+static inline struct malloc_chunk *chunk_plus_offset(void *chunk, size_t size) {
+    return (struct malloc_chunk *) (((char *) chunk) + size);
+}
+
+static inline struct malloc_chunk *chunk_minus_offset(void *chunk, size_t size) {
+    return (struct malloc_chunk *) (((char *) chunk) - size);
+}
+
+static inline struct malloc_chunk *next_chunk(void *chunk) {
+    return (struct malloc_chunk *) (((char *) chunk) + (((struct any_chunk *) chunk)->head & ~FLAG_BITS));
+}
+
+static inline struct malloc_chunk *prev_chunk(void *chunk) {
+    return (struct malloc_chunk *) (((char *) chunk) - (((struct any_chunk *) chunk)->prev_foot));
+} 
+
+/* Get the internal overhead associated with chunk p */
+static inline size_t overhead_for(void *chunk) {
+    return is_mmapped(chunk) ? MMAP_CHUNK_OVERHEAD : CHUNK_OVERHEAD;
+}
+
+/* Return true if malloced space is not necessarily cleared */
+static inline int calloc_must_clear(void *chunk) {
+    return !is_mmapped(chunk);
+} 
+
+
+/* Set curr_inuse bit and prev_inuse bit of next chunk */
+static inline void set_inuse(struct malloc_state *state, void *chunk, size_t size) {
+    (void) state; // unused
+    ((struct any_chunk *) chunk)->head = (((struct any_chunk *) chunk)->head & PREV_INUSE_BIT) | size | CURR_INUSE_BIT;
+    ((struct malloc_chunk *) (((char *) chunk) + size))->head |= PREV_INUSE_BIT;
+}
+
+/* Set curr_inuse and prev_inuse of this chunk and prev_inuse of next chunk */
+static inline void set_inuse_and_prev_inuse(struct malloc_state *state, void *chunk, size_t size) {
+    (void) state; // unused
+    ((struct any_chunk *) chunk)->head = size | PREV_INUSE_BIT | CURR_INUSE_BIT;
+    ((struct malloc_chunk *) (((char *) chunk) + size))->head |= PREV_INUSE_BIT;
+}
+
+/* Set size, curr_inuse and prev_inuse bit of this chunk */
+static inline void set_size_and_prev_inuse_of_inuse_chunk(struct malloc_state *state, void *chunk, size_t size) {
+    (void) state; // unused
+    ((struct any_chunk *) chunk)->head = size | PREV_INUSE_BIT | CURR_INUSE_BIT;
+}
+
+struct malloc_tree_chunk {
+    /* The first four fields must be compatible with malloc_chunk */
+    size_t prev_foot;
+    size_t head;
+    struct malloc_tree_chunk *fd;
+    struct malloc_tree_chunk *bk;
+
+    struct malloc_tree_chunk *child[2];
+    struct malloc_tree_chunk *parent;
+    bin_index_t index;
+}; 
+
 void insert_small_chunk(mblockptr *chunk, size_t size);
 void insert_large_chunk(mblockptr *chunk, size_t size);
 
