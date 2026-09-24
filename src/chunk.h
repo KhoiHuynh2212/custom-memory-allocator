@@ -2,7 +2,7 @@
 #define MALLOC_CHUNK
 
 #include <sys/types.h>
-#include "malloc_config.h"
+#include "config.h"
 #include "list.h"
 
 #define CHUNK_ALIGN_MASK (MALLOC_ALIGNMENT - ((size_t)1))
@@ -161,7 +161,6 @@ static inline int calloc_must_clear(void *chunk) {
     return !is_mmapped(chunk);
 } 
 
-
 /* Set curr_inuse bit and prev_inuse bit of next chunk */
 static inline void set_inuse(struct malloc_state *state, void *chunk, size_t size) {
     (void) state; // unused
@@ -194,7 +193,40 @@ struct malloc_tree_chunk {
     bin_index_t index;
 }; 
 
-void insert_small_chunk(mblockptr *chunk, size_t size);
-void insert_large_chunk(mblockptr *chunk, size_t size);
+/*Helper macros for tree*/
+static inline struct malloc_tree_chunk* leftmost_child(struct malloc_tree_chunk * t) {
+    return t->child[0] != 0 ? t->child[0] : t->child[1];
+} 
+
+#define compute_tree_index(S, I)\
+{\
+  unsigned int X = S >> TREE_BIN_SHIFT;\
+  if (X == 0)\
+    I = 0;\
+  else if (X > 0xFFFF)\
+    I = NUM_TREE_BINS-1;\
+  else {\
+    unsigned int K = (unsigned) sizeof(X)*__CHAR_BIT__ - 1 - (unsigned) __builtin_clz(X); \
+    I =  (bin_index_t) ((K << 1) + ((S >> (K + (TREE_BIN_SHIFT-1)) & 1)));\
+  }\
+}
+
+void insert_chunk(struct malloc_state *, struct malloc_chunk *, size_t);
+
+void unlink_chunk(struct malloc_state *, struct malloc_chunk *, size_t); 
+
+void insert_small_chunk(struct malloc_state *, struct malloc_chunk *, size_t);
+
+void unlink_small_chunk(struct malloc_state *, struct malloc_chunk *, size_t);
+
+void unlink_first_small_chunk(struct malloc_state *, struct malloc_chunk *, struct malloc_chunk *, bin_index_t);
+
+void replace_dv(struct malloc_state *, struct malloc_chunk *, size_t);
+
+void insert_large_chunk(struct malloc_state *, struct malloc_tree_chunk *, size_t);
+
+void unlink_large_chunk(struct malloc_state *, struct malloc_tree_chunk *);
+
+void dispose_chunk(struct malloc_state *, struct malloc_chunk *, size_t);
 
 #endif MALLOC_CHUNK

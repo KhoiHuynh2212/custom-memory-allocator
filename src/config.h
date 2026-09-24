@@ -8,21 +8,21 @@
 #endif  /* MALLOC_ALIGNMENT */
 
 
-#ifndef HEAP_CONTIGUOUS
-#define HEAP_CONTIGUOUS 1
+#ifndef MORECORE_CONTIGUOUS
+#define MORECORE_CONTIGUOUS 1
 #endif
 
 #ifndef DEFAULT_GRANULARITY 
-#if (HEAP_CONTIGUOUS) 
+#if (MORECORE_CONTIGUOUS) 
 #define DEFAULT_GRANULARITY (0) 
-#else   /* HEAP_CONTIGUOUS */
+#else   /* MORECORE_CONTIGUOUS */
 #define DEFAULT_GRANULARITY ((size_t) 64U * (size_t) 1024U)
-#endif  /* HEAP_CONTIGUOUS */
+#endif  /* MORECORE_CONTIGUOUS */
 #endif  /* DEFAULT_GRANULARITY */
 
 
-#ifndef TRIM_THRESHOLD
-#define TRIM_THRESHOLD ((size_t) 2U * (size_t) 64U * (size_t) 1024U)
+#ifndef DEFAULT_MMAP_THRESHOLD
+#define DEFAULT_MMAP_THRESHOLD ((size_t) 2U * (size_t) 64U * (size_t) 1024U)
 #endif
 
 
